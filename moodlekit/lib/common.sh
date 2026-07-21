@@ -232,8 +232,11 @@ render_template() {
         local pair="$1"; shift
         local key="${pair%%=*}"
         local val="${pair#*=}"
-        # Escape & in val for sed
-        val="$(echo "${val}" | sed 's/[&/\\]/\\&/g; s/\n/\\n/g')"
+        # Escape characters for sed
+        val="${val//\\/\\\\}"
+        val="${val//|/\\|}"
+        val="${val//&/\\&}"
+        val="${val//$'\n'/\\n}"
         content="$(echo "${content}" | sed "s|{{${key}}}|${val}|g")"
     done
 

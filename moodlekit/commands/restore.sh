@@ -292,7 +292,8 @@ _do_fresh_provisioning() {
     local PHP_VERSION="${bk_php_version:-${PHP_VERSION}}"
 
     local NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
-    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${SLUG}.conf"
+    local FPM_SOCK="/run/php/php${PHP_VERSION}-fpm-moodle_${slug}.sock"
+    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
     local ADMIN_CLI="${MOODLE_DIR}/$([ "${IS_MOODLE5}" -eq 1 ] && echo "public/")admin/cli"
 
     # ── Step 1: Provision database ─────────────────────────────────────────
@@ -345,10 +346,25 @@ _do_fresh_provisioning() {
         info "No code archive — cloning Moodle ${bk_moodle_version}..."
         git clone --depth 1 --branch "${branch}" \
             https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+
+        # Run Composer if needed
+        local composer_json="${MOODLE_DIR}/composer.json"
+        if [[ -f "${composer_json}" ]]; then
+            if ! command -v composer &>/dev/null; then
+                spinner_start "Installing Composer..."
+                curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+                spinner_stop 0 "Composer installed"
+            fi
+            spinner_start "Running composer install..."
+            COMPOSER_ALLOW_SUPERUSER=1 composer install \
+                --no-dev --optimize-autoloader --no-interaction \
+                --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
+            spinner_stop 0 "Composer done"
+        fi
     fi
 
-    # ── Step 3: Restore moodledata ─────────────────────────────────────────
-    step 3 10 "Restore moodledata"
+    # ── Step 4: Restore moodledata ─────────────────────────────────────────
+    step 4 10 "Restore moodledata"
     mkdir -p "$(dirname "${MOODLEDATA_DIR}")"
     if [[ -f "${data_archive}" ]]; then
         # Archive: extract .tar.gz
@@ -373,8 +389,8 @@ _do_fresh_provisioning() {
     register_rollback "rm -rf '${MOODLEDATA_DIR}'"
     ok "moodledata ready"
 
-    # ── Step 4: Generate config.php ────────────────────────────────────────
-    step 4 10 "Generate config.php"
+    # ── Step 5: Generate config.php ────────────────────────────────────────
+    step 5 10 "Generate config.php"
     local moodle_dbtype
     case "${bk_db_type}" in
         postgres) moodle_dbtype="pgsql"   ;;
@@ -388,11 +404,25 @@ _do_fresh_provisioning() {
     [[ "${IS_MOODLE5}" -ne 1 ]] && tpl="${MOODLEKIT_TPL}/config-moodle4.php.tpl"
 
     local cache_block=""
-    [[ "${USE_REDIS:-0}" == "1" ]] && cache_block="
+    if [[ "${USE_REDIS:-0}" == "1" ]]; then
+        cache_block+="
+// ── Redis Session Handler ─────────────────────────────────────────────────
 \$CFG->session_handler_class = '\core\session\redis';
 \$CFG->session_redis_host    = '127.0.0.1';
 \$CFG->session_redis_port    = 6379;
-\$CFG->session_redis_prefix  = 'mdl_${slug}_sess_';"
+\$CFG->session_redis_database = 0;
+\$CFG->session_redis_prefix  = 'mdl_${slug}_sess_';
+\$CFG->session_redis_acquire_lock_timeout = 120;
+\$CFG->session_redis_lock_expire          = 7200;
+\$CFG->session_redis_serializer_use_igbinary = false;"
+    fi
+
+    if [[ "${USE_MEMCACHED:-0}" == "1" ]]; then
+        cache_block+="
+// ── Memcached (MUC Application Cache — sessions handled by Redis) ─────────
+// Store instance 'memcached_muc' configured below.
+// MUC mapping is done via Site Admin → Plugins → Caching → Configuration"
+    fi
 
     render_template_to_file "${tpl}" "${MOODLE_DIR}/config.php" \
         "SLUG=${slug}" \
@@ -410,8 +440,13 @@ _do_fresh_provisioning() {
     chmod 640 "${MOODLE_DIR}/config.php"
     ok "config.php generated"
 
-    # ── Step 5: Permissions ────────────────────────────────────────────────
-    step 5 10 "Set permissions"
+    # MUC Redis setup — create store instance programmatically
+    if [[ "${USE_REDIS:-0}" == "1" ]]; then
+        _configure_muc_redis "${slug}" "${MOODLE_DIR}" "${IS_MOODLE5}"
+    fi
+
+    # ── Step 6: Permissions ────────────────────────────────────────────────
+    step 6 10 "Set permissions"
     chown -R root:www-data "${MOODLE_DIR}"
     find "${MOODLE_DIR}" -type d -exec chmod 755 {} \;
     find "${MOODLE_DIR}" -type f -exec chmod 644 {} \;
@@ -419,8 +454,8 @@ _do_fresh_provisioning() {
     chmod 640 "${MOODLE_DIR}/config.php"
     ok "Permissions set"
 
-    # ── Step 6: FPM pool + Nginx HTTP ──────────────────────────────────────
-    step 6 10 "FPM pool + Nginx vhost"
+    # ── Step 7: FPM pool + Nginx HTTP ──────────────────────────────────────
+    step 7 10 "FPM pool + Nginx vhost"
     local num_sites
     num_sites="$(list_site_slugs | wc -l)"
     num_sites=$(( num_sites + 1 ))
@@ -467,8 +502,8 @@ HTTPONLY
     reload_nginx
     ok "Nginx HTTP vhost active"
 
-    # ── Step 7: TLS certificate ────────────────────────────────────────────
-    step 7 10 "TLS certificate"
+    # ── Step 8: TLS certificate ────────────────────────────────────────────
+    step 8 10 "TLS certificate"
     if [[ "${SKIP_TLS}" == "1" ]]; then
         warn "TLS skipped (local domain). Site will use HTTP only."
         ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/moodle-${slug}"
@@ -487,8 +522,8 @@ HTTPONLY
         ok "TLS certificate obtained for ${DOMAIN}"
     fi
 
-    # ── Step 8: Run upgrade ────────────────────────────────────────────────
-    step 8 10 "Moodle upgrade"
+    # ── Step 9: Run upgrade ────────────────────────────────────────────────
+    step 9 10 "Moodle upgrade"
     if [[ -f "${ADMIN_CLI}/upgrade.php" ]]; then
         sudo -u www-data "/usr/bin/php${PHP_VERSION}" \
             "${ADMIN_CLI}/upgrade.php" --non-interactive 2>&1 | tee -a "${_LOG_FILE}" || true
@@ -496,8 +531,9 @@ HTTPONLY
         warn "upgrade.php not found at ${ADMIN_CLI}, skipping upgrade"
     fi
 
-    # ── Step 9: Cron + State ───────────────────────────────────────────────
-    step 9 10 "Cron + Save state"
+    # ── Step 10: Cron + State ───────────────────────────────────────────────
+    step 10 10 "Cron + Save state"
+    _configure_task_processing "${ADMIN_CLI}"
     _configure_cron "${slug}" "${MOODLE_DIR}" "${IS_MOODLE5}"
 
     cat > "${MOODLEKIT_SITES_DIR}/${slug}.conf" << SITECONF

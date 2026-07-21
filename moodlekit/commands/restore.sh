@@ -211,14 +211,14 @@ _restore_manual() {
     input_text slug "Enter site slug (e.g. mysite)" "" '^[a-z][a-z0-9-]{2,19}$' "Invalid slug format"
 
     local dump_file=""
-    input_path dump_file "Path to .sql or .sql.gz file [leave blank to skip]" ""
+    input_path dump_file "Path to .sql or .sql.gz file [leave blank to skip]" "" "1"
     if [[ -n "${dump_file}" && ! -f "${dump_file}" ]]; then
         err "File not found: ${dump_file}"
         exit 1
     fi
 
     local data_archive=""
-    input_path data_archive "Path to moodledata archive (.tar.gz) or raw data directory [leave blank to skip]" ""
+    input_path data_archive "Path to moodledata archive (.tar.gz) or raw data directory [leave blank to skip]" "" "1"
     if [[ -n "${data_archive}" && ! -f "${data_archive}" && ! -d "${data_archive}" ]]; then
         err "Not found (file or directory): ${data_archive}"
         exit 1

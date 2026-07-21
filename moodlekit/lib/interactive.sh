@@ -277,13 +277,14 @@ input_text() {
 
 # ---------------------------------------------------------------------------
 # Path input with Tab-completion (readline mode)
-# Usage: input_path RESULT_VAR "Prompt" [default]
+# Usage: input_path RESULT_VAR "Prompt" [default] [allow_empty]
 # Uses `read -e` so the user can press Tab to browse the filesystem.
 # ---------------------------------------------------------------------------
 input_path() {
     local -n _path_ref="$1"; shift
     local prompt="$1"
     local default="${2:-}"
+    local allow_empty="${3:-0}"
 
     if [[ "${MOODLEKIT_YES:-0}" == "1" ]] && [[ -n "${default}" ]]; then
         _path_ref="${default}"
@@ -306,8 +307,13 @@ input_path() {
         [[ -z "${input}" && -n "${default}" ]] && input="${default}"
 
         if [[ -z "${input}" ]]; then
-            warn "Path cannot be empty."
-            continue
+            if [[ "${allow_empty}" == "1" ]]; then
+                _path_ref=""
+                break
+            else
+                warn "Path cannot be empty."
+                continue
+            fi
         fi
 
         _path_ref="${input}"

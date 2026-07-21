@@ -296,98 +296,171 @@ _do_fresh_provisioning() {
     local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
     local ADMIN_CLI="${MOODLE_DIR}/$([ "${IS_MOODLE5}" -eq 1 ] && echo "public/")admin/cli"
 
+    # ── Resume detection ───────────────────────────────────────────────────
+    local SKIP_DB_PROVISION=0
+    local SKIP_DB_IMPORT=0
+    local SKIP_CLONE=0
+    local SKIP_MOODLEDATA=0
+
+    # 1. Database check
+    local db_exists=0
+    case "${bk_db_type}" in
+        postgres) sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw "${DB_NAME}" && db_exists=1 ;;
+        mariadb|mysql) mysql -u root -e "SHOW DATABASES LIKE '${DB_NAME}';" 2>/dev/null | grep -qw "${DB_NAME}" && db_exists=1 ;;
+    esac
+
+    if [[ "${db_exists}" -eq 1 ]]; then
+        warn "Database '${DB_NAME}' already exists."
+        local db_action=""
+        select_one db_action "How to handle existing database?" \
+            "Keep it and skip import (resume)" \
+            "Drop and recreate (fresh import)" \
+            "Abort"
+        case "${db_action}" in
+            *Keep*) SKIP_DB_PROVISION=1; SKIP_DB_IMPORT=1 ;;
+            *Drop*) SKIP_DB_PROVISION=0; SKIP_DB_IMPORT=0 ;;
+            *Abort*) exit 1 ;;
+        esac
+    fi
+
+    # 2. Existing config.php check
+    if [[ -f "${MOODLE_DIR}/config.php" ]]; then
+        info "Found existing config.php. Extracting credentials..."
+        local ex_db_name="$(grep -E "^\s*\\\$CFG->dbname\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_db_user="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_db_pass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_domain="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 | sed 's|https://||' | sed 's|http://||' || true)"
+        
+        [[ -n "${ex_db_name}" ]] && DB_NAME="${ex_db_name}"
+        [[ -n "${ex_db_user}" ]] && DB_USER="${ex_db_user}"
+        [[ -n "${ex_db_pass}" ]] && DB_PASS="${ex_db_pass}"
+        [[ -n "${ex_domain}" ]] && DOMAIN="${ex_domain}"
+    fi
+
+    # 3. Moodle Dir check
+    if [[ -d "${MOODLE_DIR}" && "$(ls -A "${MOODLE_DIR}" 2>/dev/null)" ]]; then
+        warn "Directory ${MOODLE_DIR} already contains files."
+        if confirm "Skip Moodle source code extraction/cloning?" "y"; then
+            SKIP_CLONE=1
+        fi
+    fi
+
+    # 4. Moodledata check
+    if [[ -d "${MOODLEDATA_DIR}" && "$(ls -A "${MOODLEDATA_DIR}" 2>/dev/null)" ]]; then
+        warn "Directory ${MOODLEDATA_DIR} already contains files."
+        if confirm "Skip moodledata extraction?" "y"; then
+            SKIP_MOODLEDATA=1
+        fi
+    fi
+
     # ── Step 1: Provision database ─────────────────────────────────────────
     step 1 10 "Provision database"
-    [[ -f "${dump_file}" ]] || { err "No database.sql.gz in backup"; exit 1; }
+    if [[ "${SKIP_DB_PROVISION}" -eq 1 ]]; then
+        info "Skipped (using existing database)"
+    else
+        [[ -f "${dump_file}" ]] || { err "No database.sql.gz in backup"; exit 1; }
 
-    case "${bk_db_type}" in
-        postgres) db_pg_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
-        mariadb)  db_maria_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
-        mysql)    db_mysql_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
-    esac
-    register_rollback "_db_drop_by_type '${bk_db_type}' '${DB_NAME}' '${DB_USER}'"
+        case "${bk_db_type}" in
+            postgres) db_pg_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
+            mariadb)  db_maria_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
+            mysql)    db_mysql_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
+        esac
+        register_rollback "_db_drop_by_type '${bk_db_type}' '${DB_NAME}' '${DB_USER}'"
+    fi
 
     # ── Step 2: Import database ────────────────────────────────────────────
     step 2 10 "Import database"
-    local actual_dump="${dump_file}"
-    if [[ "${dump_file}" == *.sql ]]; then
-        info "Compressing raw SQL on the fly..."
-        actual_dump="$(mktemp --suffix=.sql.gz)"
-        gzip -c "${dump_file}" > "${actual_dump}"
-        register_rollback "rm -f '${actual_dump}'"
+    if [[ "${SKIP_DB_IMPORT}" -eq 1 ]]; then
+        info "Skipped (using existing database data)"
+    else
+        local actual_dump="${dump_file}"
+        if [[ "${dump_file}" == *.sql ]]; then
+            info "Compressing raw SQL on the fly..."
+            actual_dump="$(mktemp --suffix=.sql.gz)"
+            gzip -c "${dump_file}" > "${actual_dump}"
+            register_rollback "rm -f '${actual_dump}'"
+        fi
+        
+        case "${bk_db_type}" in
+            postgres) db_pg_restore    "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
+            mariadb)  db_maria_restore "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
+            mysql)    db_mysql_restore  "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
+        esac
     fi
-    
-    case "${bk_db_type}" in
-        postgres) db_pg_restore    "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
-        mariadb)  db_maria_restore "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
-        mysql)    db_mysql_restore  "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
-    esac
 
     # ── Step 3: Download Moodle ────────────────────────────────────────────
     step 3 10 "Download Moodle (${MOODLE_VERSION})"
-    mkdir -p "${MOODLE_DIR}"
-    register_rollback "rm -rf '${MOODLE_DIR}'"
-
-    if [[ -f "${code_archive}" ]]; then
-        spinner_start "Extracting code archive..."
-        tar --extract --gzip \
-            --file="${code_archive}" \
-            --directory="$(dirname "${MOODLE_DIR}")"
-        # Rename if slug differs from backup
-        local extracted_dir
-        extracted_dir="$(tar -tzf "${code_archive}" | head -1 | cut -f1 -d"/")"
-        if [[ -n "${extracted_dir}" && "${extracted_dir}" != "${slug}" ]]; then
-            mv "$(dirname "${MOODLE_DIR}")/${extracted_dir}" "${MOODLE_DIR}"
-        fi
-        spinner_stop 0 "Code extracted from archive"
+    if [[ "${SKIP_CLONE}" -eq 1 ]]; then
+        info "Skipped (using existing files in ${MOODLE_DIR})"
     else
-        # Clone fresh matching version
-        local branch="$(moodle_version_to_branch "${bk_moodle_version}")"
-        info "No code archive — cloning Moodle ${bk_moodle_version}..."
-        git clone --depth 1 --branch "${branch}" \
-            https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+        mkdir -p "${MOODLE_DIR}"
+        register_rollback "rm -rf '${MOODLE_DIR}'"
 
-        # Run Composer if needed
-        local composer_json="${MOODLE_DIR}/composer.json"
-        if [[ -f "${composer_json}" ]]; then
-            if ! command -v composer &>/dev/null; then
-                spinner_start "Installing Composer..."
-                curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-                spinner_stop 0 "Composer installed"
+        if [[ -f "${code_archive}" ]]; then
+            spinner_start "Extracting code archive..."
+            tar --extract --gzip \
+                --file="${code_archive}" \
+                --directory="$(dirname "${MOODLE_DIR}")"
+            # Rename if slug differs from backup
+            local extracted_dir
+            extracted_dir="$(tar -tzf "${code_archive}" | head -1 | cut -f1 -d"/")"
+            if [[ -n "${extracted_dir}" && "${extracted_dir}" != "${slug}" ]]; then
+                mv "$(dirname "${MOODLE_DIR}")/${extracted_dir}" "${MOODLE_DIR}"
             fi
-            spinner_start "Running composer install..."
-            COMPOSER_ALLOW_SUPERUSER=1 composer install \
-                --no-dev --optimize-autoloader --no-interaction \
-                --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
-            spinner_stop 0 "Composer done"
+            spinner_stop 0 "Code extracted from archive"
+        else
+            # Clone fresh matching version
+            local branch="$(moodle_version_to_branch "${bk_moodle_version}")"
+            info "No code archive — cloning Moodle ${bk_moodle_version}..."
+            git clone --depth 1 --branch "${branch}" \
+                https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+
+            # Run Composer if needed
+            local composer_json="${MOODLE_DIR}/composer.json"
+            if [[ -f "${composer_json}" ]]; then
+                if ! command -v composer &>/dev/null; then
+                    spinner_start "Installing Composer..."
+                    curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+                    spinner_stop 0 "Composer installed"
+                fi
+                spinner_start "Running composer install..."
+                COMPOSER_ALLOW_SUPERUSER=1 composer install \
+                    --no-dev --optimize-autoloader --no-interaction \
+                    --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
+                spinner_stop 0 "Composer done"
+            fi
         fi
     fi
 
     # ── Step 4: Restore moodledata ─────────────────────────────────────────
     step 4 10 "Restore moodledata"
-    mkdir -p "$(dirname "${MOODLEDATA_DIR}")"
-    if [[ -f "${data_archive}" ]]; then
-        # Archive: extract .tar.gz
-        spinner_start "Extracting moodledata archive..."
-        tar --extract --gzip \
-            --file="${data_archive}" \
-            --directory="$(dirname "${MOODLEDATA_DIR}")"
-        spinner_stop 0 "moodledata extracted"
-    elif [[ -d "${data_archive}" ]]; then
-        # Raw directory: copy in place
-        spinner_start "Copying raw moodledata directory..."
-        rm -rf "${MOODLEDATA_DIR}"
-        cp -a "${data_archive}" "${MOODLEDATA_DIR}"
-        spinner_stop 0 "moodledata copied"
+    if [[ "${SKIP_MOODLEDATA}" -eq 1 ]]; then
+        info "Skipped (using existing moodledata)"
     else
-        # Nothing provided: create an empty data dir
-        warn "No moodledata source provided — creating empty data directory."
-        mkdir -p "${MOODLEDATA_DIR}"
+        mkdir -p "$(dirname "${MOODLEDATA_DIR}")"
+        if [[ -f "${data_archive}" ]]; then
+            # Archive: extract .tar.gz
+            spinner_start "Extracting moodledata archive..."
+            tar --extract --gzip \
+                --file="${data_archive}" \
+                --directory="$(dirname "${MOODLEDATA_DIR}")"
+            spinner_stop 0 "moodledata extracted"
+        elif [[ -d "${data_archive}" ]]; then
+            # Raw directory: copy in place
+            spinner_start "Copying raw moodledata directory..."
+            rm -rf "${MOODLEDATA_DIR}"
+            cp -a "${data_archive}" "${MOODLEDATA_DIR}"
+            spinner_stop 0 "moodledata copied"
+        else
+            # Nothing provided: create an empty data dir
+            warn "No moodledata source provided — creating empty data directory."
+            mkdir -p "${MOODLEDATA_DIR}"
+        fi
+        chown -R www-data:www-data "${MOODLEDATA_DIR}"
+        chmod -R 02777 "${MOODLEDATA_DIR}"
+        register_rollback "rm -rf '${MOODLEDATA_DIR}'"
+        ok "moodledata ready"
     fi
-    chown -R www-data:www-data "${MOODLEDATA_DIR}"
-    chmod -R 02777 "${MOODLEDATA_DIR}"
-    register_rollback "rm -rf '${MOODLEDATA_DIR}'"
-    ok "moodledata ready"
 
     # ── Step 5: Generate config.php ────────────────────────────────────────
     step 5 10 "Generate config.php"

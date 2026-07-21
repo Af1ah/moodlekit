@@ -158,61 +158,120 @@ cmd_site_create() {
     step 2 12 "DNS check"
     dns_check "${DOMAIN}" "${SKIP_DNS}"
 
+    # ── Resume detection ───────────────────────────────────────────────────
+    local SKIP_DB=0
+    local SKIP_CLONE=0
+    local SKIP_INSTALLER=0
+
+    # 1. Database check
+    local db_exists=0
+    case "${DB_TYPE}" in
+        postgres) sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw "${DB_NAME}" && db_exists=1 ;;
+        mariadb|mysql) mysql -u root -e "SHOW DATABASES LIKE '${DB_NAME}';" 2>/dev/null | grep -qw "${DB_NAME}" && db_exists=1 ;;
+    esac
+
+    if [[ "${db_exists}" -eq 1 ]]; then
+        warn "Database '${DB_NAME}' already exists."
+        local db_action=""
+        select_one db_action "How to handle existing database?" \
+            "Keep it (skip DB creation)" \
+            "Drop and recreate" \
+            "Abort"
+        case "${db_action}" in
+            *Keep*) SKIP_DB=1 ;;
+            *Drop*) SKIP_DB=0 ;;
+            *Abort*) exit 1 ;;
+        esac
+    fi
+
+    # 2. Existing config.php check
+    if [[ -f "${MOODLE_DIR}/config.php" ]]; then
+        info "Found existing config.php. Extracting credentials..."
+        local ex_db_name="$(grep -E "^\s*\\\$CFG->dbname\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_db_user="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_db_pass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
+        local ex_domain="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 | sed 's|https://||' | sed 's|http://||' || true)"
+        
+        [[ -n "${ex_db_name}" ]] && DB_NAME="${ex_db_name}"
+        [[ -n "${ex_db_user}" ]] && DB_USER="${ex_db_user}"
+        [[ -n "${ex_db_pass}" ]] && DB_PASS="${ex_db_pass}"
+        [[ -n "${ex_domain}" ]] && DOMAIN="${ex_domain}"
+        
+        if confirm "config.php exists. Skip running the Moodle installer?" "y"; then
+            SKIP_INSTALLER=1
+        fi
+    fi
+
+    # 3. Moodle Dir check
+    if [[ -d "${MOODLE_DIR}" && "$(ls -A "${MOODLE_DIR}" 2>/dev/null)" ]]; then
+        if confirm "Directory ${MOODLE_DIR} is not empty. Skip cloning Moodle?" "y"; then
+            SKIP_CLONE=1
+        fi
+    fi
+
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 3/12 — Create database
     # ─────────────────────────────────────────────────────────────────────────
     step 3 12 "Create database (${DB_TYPE})"
-    case "${DB_TYPE}" in
-        postgres)
-            db_pg_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
-            register_rollback "db_pg_drop '${DB_NAME}' '${DB_USER}'"
-            ;;
-        mariadb)
-            db_maria_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
-            register_rollback "db_maria_drop '${DB_NAME}' '${DB_USER}'"
-            ;;
-        mysql)
-            db_mysql_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
-            register_rollback "db_mysql_drop '${DB_NAME}' '${DB_USER}'"
-            ;;
-    esac
+    if [[ "${SKIP_DB}" -eq 1 ]]; then
+        info "Skipped (using existing database)"
+    else
+        case "${DB_TYPE}" in
+            postgres)
+                db_pg_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+                register_rollback "db_pg_drop '${DB_NAME}' '${DB_USER}'"
+                ;;
+            mariadb)
+                db_maria_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+                register_rollback "db_maria_drop '${DB_NAME}' '${DB_USER}'"
+                ;;
+            mysql)
+                db_mysql_create "${SLUG}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+                register_rollback "db_mysql_drop '${DB_NAME}' '${DB_USER}'"
+                ;;
+        esac
+    fi
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 4/12 — Clone Moodle
     # ─────────────────────────────────────────────────────────────────────────
     step 4 12 "Clone Moodle ${MOODLE_VERSION}"
-    mkdir -p "${MOODLE_DIR}"
-    register_rollback "rm -rf '${MOODLE_DIR}'"
-
-    if [[ -n "${MOODLE_TAG}" ]]; then
-        git clone --depth 1 --branch "${MOODLE_TAG}" \
-            https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+    if [[ "${SKIP_CLONE}" -eq 1 ]]; then
+        info "Skipped (using existing Moodle files)"
     else
-        git clone --depth 1 --branch "${MOODLE_BRANCH}" \
-            https://github.com/moodle/moodle.git "${MOODLE_DIR}"
-    fi
-    ok "Moodle cloned"
+        mkdir -p "${MOODLE_DIR}"
+        register_rollback "rm -rf '${MOODLE_DIR}'"
 
-    # Run Composer if needed (Moodle 5.x always needs it)
-    local composer_json
-    if [[ "${IS_MOODLE5}" -eq 1 ]]; then
-        composer_json="${MOODLE_DIR}/composer.json"
-    else
-        composer_json="${MOODLE_DIR}/composer.json"
-    fi
-
-    if [[ -f "${composer_json}" ]]; then
-        # Auto-install Composer if missing
-        if ! command -v composer &>/dev/null; then
-            spinner_start "Installing Composer..."
-            curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-            spinner_stop 0 "Composer installed"
+        if [[ -n "${MOODLE_TAG}" ]]; then
+            git clone --depth 1 --branch "${MOODLE_TAG}" \
+                https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+        else
+            git clone --depth 1 --branch "${MOODLE_BRANCH}" \
+                https://github.com/moodle/moodle.git "${MOODLE_DIR}"
         fi
-        spinner_start "Running composer install..."
-        COMPOSER_ALLOW_SUPERUSER=1 composer install \
-            --no-dev --optimize-autoloader --no-interaction \
-            --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
-        spinner_stop 0 "Composer done"
+        ok "Moodle cloned"
+
+        # Run Composer if needed (Moodle 5.x always needs it)
+        local composer_json
+        if [[ "${IS_MOODLE5}" -eq 1 ]]; then
+            composer_json="${MOODLE_DIR}/composer.json"
+        else
+            composer_json="${MOODLE_DIR}/composer.json"
+        fi
+
+        if [[ -f "${composer_json}" ]]; then
+            # Auto-install Composer if missing
+            if ! command -v composer &>/dev/null; then
+                spinner_start "Installing Composer..."
+                curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+                spinner_stop 0 "Composer installed"
+            fi
+            spinner_start "Running composer install..."
+            COMPOSER_ALLOW_SUPERUSER=1 composer install \
+                --no-dev --optimize-autoloader --no-interaction \
+                --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
+            spinner_stop 0 "Composer done"
+        fi
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -352,59 +411,63 @@ HTTPONLY
     # ─────────────────────────────────────────────────────────────────────────
     step 9 12 "Moodle CLI install"
 
-    # Moodle installer location differs by version
-    local installer="${MOODLE_DIR}/admin/cli/install.php"
+    if [[ "${SKIP_INSTALLER}" -eq 1 ]]; then
+        info "Skipped (using existing config.php)"
+    else
+        # Moodle installer location differs by version
+        local installer="${MOODLE_DIR}/admin/cli/install.php"
 
-    # Map DB type to Moodle's dbtype string
-    local moodle_dbtype
-    case "${DB_TYPE}" in
-        postgres) moodle_dbtype="pgsql"   ;;
-        mariadb)  moodle_dbtype="mariadb" ;;
-        mysql)    moodle_dbtype="mysqli"  ;;
-    esac
+        # Map DB type to Moodle's dbtype string
+        local moodle_dbtype
+        case "${DB_TYPE}" in
+            postgres) moodle_dbtype="pgsql"   ;;
+            mariadb)  moodle_dbtype="mariadb" ;;
+            mysql)    moodle_dbtype="mysqli"  ;;
+        esac
 
-    # Ensure baseline PHP limits meet Moodle's strict requirements automatically
-    local php_ini_cli="/etc/php/${PHP_VERSION}/cli/php.ini"
-    local php_ini_fpm="/etc/php/${PHP_VERSION}/fpm/php.ini"
-    for ini_file in "${php_ini_cli}" "${php_ini_fpm}"; do
-        if [[ -f "${ini_file}" ]]; then
-            sed -i 's/^;\?max_input_vars\s*=.*/max_input_vars = 10000/' "${ini_file}"
-            sed -i 's/^;\?memory_limit\s*=.*/memory_limit = 512M/' "${ini_file}"
-            sed -i 's/^;\?upload_max_filesize\s*=.*/upload_max_filesize = 100M/' "${ini_file}"
-            sed -i 's/^;\?post_max_size\s*=.*/post_max_size = 100M/' "${ini_file}"
-            sed -i 's/^;\?max_execution_time\s*=.*/max_execution_time = 300/' "${ini_file}"
-        fi
-    done
-    
-    spinner_start "Running Moodle installer (this may take a few minutes)..."
-    
-    # Temporarily grant www-data ownership so it can write config.php
-    chown www-data "${MOODLE_DIR}"
+        # Ensure baseline PHP limits meet Moodle's strict requirements automatically
+        local php_ini_cli="/etc/php/${PHP_VERSION}/cli/php.ini"
+        local php_ini_fpm="/etc/php/${PHP_VERSION}/fpm/php.ini"
+        for ini_file in "${php_ini_cli}" "${php_ini_fpm}"; do
+            if [[ -f "${ini_file}" ]]; then
+                sed -i 's/^;\?max_input_vars\s*=.*/max_input_vars = 10000/' "${ini_file}"
+                sed -i 's/^;\?memory_limit\s*=.*/memory_limit = 512M/' "${ini_file}"
+                sed -i 's/^;\?upload_max_filesize\s*=.*/upload_max_filesize = 100M/' "${ini_file}"
+                sed -i 's/^;\?post_max_size\s*=.*/post_max_size = 100M/' "${ini_file}"
+                sed -i 's/^;\?max_execution_time\s*=.*/max_execution_time = 300/' "${ini_file}"
+            fi
+        done
+        
+        spinner_start "Running Moodle installer (this may take a few minutes)..."
+        
+        # Temporarily grant www-data ownership so it can write config.php
+        chown www-data "${MOODLE_DIR}"
 
-    sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${installer}" \
-        --chmod=02777 \
-        --lang=en \
-        --wwwroot="https://${DOMAIN}" \
-        --dataroot="${MOODLEDATA_DIR}" \
-        --dbtype="${moodle_dbtype}" \
-        --dbhost="127.0.0.1" \
-        --dbport="${DB_PORT}" \
-        --dbname="${DB_NAME}" \
-        --dbuser="${DB_USER}" \
-        --dbpass="${DB_PASS}" \
-        --prefix="mdl_" \
-        --fullname="Moodle ${SLUG}" \
-        --shortname="${SLUG}" \
-        --adminuser="admin" \
-        --adminpass="${ADMIN_PASS}" \
-        --adminemail="${ADMIN_EMAIL}" \
-        --agree-license \
-        --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
+        sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${installer}" \
+            --chmod=02777 \
+            --lang=en \
+            --wwwroot="https://${DOMAIN}" \
+            --dataroot="${MOODLEDATA_DIR}" \
+            --dbtype="${moodle_dbtype}" \
+            --dbhost="127.0.0.1" \
+            --dbport="${DB_PORT}" \
+            --dbname="${DB_NAME}" \
+            --dbuser="${DB_USER}" \
+            --dbpass="${DB_PASS}" \
+            --prefix="mdl_" \
+            --fullname="Moodle ${SLUG}" \
+            --shortname="${SLUG}" \
+            --adminuser="admin" \
+            --adminpass="${ADMIN_PASS}" \
+            --adminemail="${ADMIN_EMAIL}" \
+            --agree-license \
+            --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
 
-    # Lock ownership back to root for security
-    chown root "${MOODLE_DIR}"
+        # Lock ownership back to root for security
+        chown root "${MOODLE_DIR}"
 
-    spinner_stop 0 "Moodle installed"
+        spinner_stop 0 "Moodle installed"
+    fi
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 10/12 — Patch config.php + MUC cache setup

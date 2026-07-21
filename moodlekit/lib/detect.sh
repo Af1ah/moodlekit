@@ -289,21 +289,34 @@ check_slug_conflicts() {
             err "  - ${c}"
         done
         echo ""
-        if confirm "Would you like to automatically clean up these conflicting resources now?" "y"; then
-            info "Running automated cleanup for '${slug}'..."
-            # Execute the site remove command as a child process with --force to skip redundant confirmations
-            if ! moodlekit site remove "${slug}" "--force"; then
+        
+        local conflict_action=""
+        select_one conflict_action "How would you like to handle these existing resources?" \
+            "Clean up automatically (Delete them and start fresh)" \
+            "Keep them and resume provisioning (Skip existing steps)" \
+            "Abort"
+
+        case "${conflict_action}" in
+            *Clean*)
+                info "Running automated cleanup for '${slug}'..."
+                if ! moodlekit site remove "${slug}" "--force"; then
+                    echo ""
+                    err "Automated cleanup was aborted or failed. Please run 'moodlekit site remove ${slug}' manually."
+                    return 1
+                fi
                 echo ""
-                err "Automated cleanup was aborted or failed. Please run 'moodlekit site remove ${slug}' manually."
+                info "Cleanup complete. Resuming site creation..."
+                return 0
+                ;;
+            *Keep*)
+                info "Resuming provisioning using existing resources..."
+                return 0
+                ;;
+            *Abort*)
+                err "Use 'moodlekit site remove ${slug}' to clean up manually, or choose a different slug."
                 return 1
-            fi
-            echo ""
-            info "Cleanup complete. Resuming site creation..."
-            return 0
-        else
-            err "Use 'moodlekit site remove ${slug}' to clean up manually, or choose a different slug."
-            return 1
-        fi
+                ;;
+        esac
     fi
 }
 

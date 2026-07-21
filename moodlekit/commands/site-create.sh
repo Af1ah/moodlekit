@@ -179,7 +179,15 @@ cmd_site_create() {
             "Abort"
         case "${db_action}" in
             *Keep*) SKIP_DB=1 ;;
-            *Drop*) SKIP_DB=0 ;;
+            *Drop*) 
+                SKIP_DB=0 
+                info "Dropping existing database '${DB_NAME}'..."
+                case "${DB_TYPE}" in
+                    postgres) db_pg_drop "${DB_NAME}" "${DB_USER}" ;;
+                    mariadb)  db_maria_drop "${DB_NAME}" "${DB_USER}" ;;
+                    mysql)    db_mysql_drop "${DB_NAME}" "${DB_USER}" ;;
+                esac
+                ;;
             *Abort*) exit 1 ;;
         esac
     fi

@@ -224,8 +224,8 @@ _restore_manual() {
         exit 1
     fi
 
-    local base_domain=""
-    input_text base_domain "Base domain (e.g. example.com)" "${BASE_DOMAIN:-}" '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' "Invalid domain"
+    local full_domain=""
+    input_text full_domain "Full domain (e.g. site.example.com)" "${slug}.${BASE_DOMAIN:-example.com}" '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' "Invalid domain"
 
     local bk_db_type=""
     select_one bk_db_type "Select Database Type inside backup:" "postgres" "mariadb" "mysql"
@@ -243,7 +243,7 @@ _restore_manual() {
     [[ "${bk_moodle_version}" == *"5."* ]] && bk_is_moodle5=1
 
     _do_fresh_provisioning "${slug}" "${dump_file}" "${data_archive}" "" \
-        "${bk_db_type}" "${bk_moodle_version}" "${bk_is_moodle5}" "${bk_php_version}" "${base_domain}" "manual"
+        "${bk_db_type}" "${bk_moodle_version}" "${bk_is_moodle5}" "${bk_php_version}" "${full_domain}" "manual"
 }
 
 # ---------------------------------------------------------------------------
@@ -272,12 +272,7 @@ _do_fresh_provisioning() {
     init_logging "restore-fresh-${slug}"
     section "Provisioning fresh instance '${slug}'"
 
-    local DOMAIN
-    if [[ "${backup_path}" == "manual" ]]; then
-        DOMAIN="${slug}.${bk_domain}"
-    else
-        DOMAIN="${bk_domain}"
-    fi
+    local DOMAIN="${bk_domain}"
     
     local SKIP_TLS=0
     # Auto-skip TLS for local/testing domains
@@ -320,8 +315,20 @@ _do_fresh_provisioning() {
             "Drop and recreate (fresh import)" \
             "Abort"
         case "${db_action}" in
-            *Keep*) SKIP_DB_PROVISION=1; SKIP_DB_IMPORT=1 ;;
-            *Drop*) SKIP_DB_PROVISION=0; SKIP_DB_IMPORT=0 ;;
+            *Keep*) 
+                SKIP_DB_PROVISION=1
+                SKIP_DB_IMPORT=1 
+                ;;
+            *Drop*) 
+                SKIP_DB_PROVISION=0
+                SKIP_DB_IMPORT=0 
+                info "Dropping existing database '${DB_NAME}'..."
+                case "${bk_db_type}" in
+                    postgres) db_pg_drop "${DB_NAME}" "${DB_USER}" ;;
+                    mariadb)  db_maria_drop "${DB_NAME}" "${DB_USER}" ;;
+                    mysql)    db_mysql_drop "${DB_NAME}" "${DB_USER}" ;;
+                esac
+                ;;
             *Abort*) exit 1 ;;
         esac
     fi

@@ -343,6 +343,14 @@ list_site_slugs() {
         | sed 's|.*/||; s|\.conf$||' | sort
 }
 
+list_removable_slugs() {
+    {
+        list_site_slugs
+        find "/var/www/moodle" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sed 's|.*/||'
+    } | sort -u
+}
+
+
 site_exists() {
     local slug="$1"
     [[ -f "${MOODLEKIT_SITES_DIR}/${slug}.conf" ]]

@@ -118,8 +118,14 @@ EOF
 _pick_site_slug() {
     local -n _slug_result="$1"
     local prompt="$2"
+    local include_partial="${3:-0}"
     local -a slugs
-    mapfile -t slugs < <(list_site_slugs 2>/dev/null)
+    
+    if [[ "${include_partial}" == "1" ]]; then
+        mapfile -t slugs < <(list_removable_slugs 2>/dev/null)
+    else
+        mapfile -t slugs < <(list_site_slugs 2>/dev/null)
+    fi
 
     if [[ ${#slugs[@]} -eq 0 ]]; then
         warn "No managed sites found."
@@ -157,7 +163,7 @@ _interactive_main_menu() {
 
         *"Site: Remove"*)
             local rem_slug=""
-            if ! _pick_site_slug rem_slug "Select site to remove:"; then return; fi
+            if ! _pick_site_slug rem_slug "Select site to remove:" "1"; then return; fi
             cmd_site_remove "${rem_slug}"
             ;;
 

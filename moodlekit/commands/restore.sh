@@ -211,8 +211,11 @@ _restore_manual() {
     input_text slug "Enter site slug (e.g. mysite)" "" '^[a-z][a-z0-9-]{2,19}$' "Invalid slug format"
 
     local dump_file=""
-    input_path dump_file "Path to .sql or .sql.gz file" ""
-    [[ -f "${dump_file}" ]] || { err "File not found: ${dump_file}"; exit 1; }
+    input_path dump_file "Path to .sql or .sql.gz file [leave blank to skip]" ""
+    if [[ -n "${dump_file}" && ! -f "${dump_file}" ]]; then
+        err "File not found: ${dump_file}"
+        exit 1
+    fi
 
     local data_archive=""
     input_path data_archive "Path to moodledata archive (.tar.gz) or raw data directory [leave blank to skip]" ""
@@ -358,8 +361,6 @@ _do_fresh_provisioning() {
     if [[ "${SKIP_DB_PROVISION}" -eq 1 ]]; then
         info "Skipped (using existing database)"
     else
-        [[ -f "${dump_file}" ]] || { err "No database.sql.gz in backup"; exit 1; }
-
         case "${bk_db_type}" in
             postgres) db_pg_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
             mariadb)  db_maria_create "${slug}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" ;;
@@ -372,6 +373,8 @@ _do_fresh_provisioning() {
     step 2 10 "Import database"
     if [[ "${SKIP_DB_IMPORT}" -eq 1 ]]; then
         info "Skipped (using existing database data)"
+    elif [[ -z "${dump_file}" || ! -f "${dump_file}" ]]; then
+        info "No database dump file provided, skipping import"
     else
         local actual_dump="${dump_file}"
         if [[ "${dump_file}" == *.sql ]]; then

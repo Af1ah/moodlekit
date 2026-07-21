@@ -1,0 +1,30 @@
+[Unit]
+Description=MoodleKit Cloud Backup (rclone + Telegram)
+Documentation=https://github.com/moodlekit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+ExecStart=/usr/bin/python3 /opt/moodlekit/backup/moodle_backup.py \
+    --config /opt/moodlekit/backup/config.json \
+    --secrets /opt/moodlekit/backup/secrets.json
+
+# Prevent OOM kills on this job
+OOMScoreAdjust=-100
+
+# Reduce I/O and CPU priority so backup doesn't impact Moodle
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+
+# Timeout: 2 hours max
+TimeoutStartSec=7200
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moodlekit-backup

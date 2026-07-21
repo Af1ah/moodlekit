@@ -387,24 +387,28 @@ HTTPONLY
     # ─────────────────────────────────────────────────────────────────────────
     step 8 12 "TLS certificate"
     if [[ "${SKIP_TLS}" == "1" ]]; then
-        warn "TLS skipped (--skip-tls). Site will use HTTP only."
-        # Use HTTPS template anyway but with self-signed or skip
-        ln -sf "${NGINX_CONF}" "${NGINX_ENABLED}"
+        warn "TLS skipped (--skip-tls). Site will use HTTPS with a self-signed fallback."
+        generate_self_signed_fallback "${DOMAIN}" "${NGINX_CONF}"
     else
-        certbot certonly \
+        if ! certbot certonly \
             --webroot \
             --webroot-path /var/www/letsencrypt \
             --domain "${DOMAIN}" \
             --email "${LETSENCRYPT_EMAIL}" \
             --agree-tos \
             --non-interactive \
-            --quiet
-
-        # Switch to HTTPS config
-        ln -sf "${NGINX_CONF}" "${NGINX_ENABLED}"
-        reload_nginx
-        ok "TLS certificate obtained for ${DOMAIN}"
+            --quiet; then
+            
+            warn "Certbot challenge failed (Domain might be behind Cloudflare/NAT)."
+            generate_self_signed_fallback "${DOMAIN}" "${NGINX_CONF}"
+        else
+            ok "TLS certificate obtained for ${DOMAIN}"
+        fi
     fi
+
+    # Switch to HTTPS config
+    ln -sf "${NGINX_CONF}" "${NGINX_ENABLED}"
+    reload_nginx
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 9/12 — Run Moodle installer

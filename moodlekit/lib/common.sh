@@ -472,3 +472,30 @@ human_size() {
         echo "${bytes}B"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# TLS / SSL Self-Signed Fallback
+# ---------------------------------------------------------------------------
+generate_self_signed_fallback() {
+    local domain="$1"
+    local nginx_conf="$2"
+    
+    local ssl_dir="/etc/ssl/moodlekit/${domain}"
+    mkdir -p "${ssl_dir}"
+    
+    if [[ ! -f "${ssl_dir}/fullchain.pem" ]]; then
+        info "Generating self-signed certificate for ${domain}..."
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "${ssl_dir}/privkey.pem" \
+            -out "${ssl_dir}/fullchain.pem" \
+            -subj "/CN=${domain}" >/dev/null 2>&1
+    fi
+    
+    # Patch Nginx config to point to self-signed certs instead of Let's Encrypt
+    sed -i "s|/etc/letsencrypt/live/${domain}/fullchain.pem|${ssl_dir}/fullchain.pem|g" "${nginx_conf}"
+    sed -i "s|/etc/letsencrypt/live/${domain}/privkey.pem|${ssl_dir}/privkey.pem|g" "${nginx_conf}"
+    sed -i "s|ssl_trusted_certificate.*||g" "${nginx_conf}"
+    
+    warn "Self-signed fallback applied. Nginx is using port 443 with self-signed cert."
+    warn "If using Cloudflare, ensure SSL/TLS encryption mode is set to 'Full' (not 'Strict')."
+}

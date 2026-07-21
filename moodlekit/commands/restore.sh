@@ -581,22 +581,27 @@ HTTPONLY
     # ── Step 8: TLS certificate ────────────────────────────────────────────
     step 8 10 "TLS certificate"
     if [[ "${SKIP_TLS}" == "1" ]]; then
-        warn "TLS skipped (local domain). Site will use HTTP only."
-        ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/moodle-${slug}"
+        warn "TLS skipped (local domain). Site will use HTTPS with a self-signed fallback."
+        generate_self_signed_fallback "${DOMAIN}" "${NGINX_CONF}"
     else
-        certbot certonly \
+        if ! certbot certonly \
             --webroot \
             --webroot-path /var/www/letsencrypt \
             --domain "${DOMAIN}" \
             --email "${LETSENCRYPT_EMAIL}" \
             --agree-tos \
             --non-interactive \
-            --quiet
-
-        ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/moodle-${slug}"
-        reload_nginx
-        ok "TLS certificate obtained for ${DOMAIN}"
+            --quiet; then
+            
+            warn "Certbot challenge failed (Domain might be behind Cloudflare/NAT)."
+            generate_self_signed_fallback "${DOMAIN}" "${NGINX_CONF}"
+        else
+            ok "TLS certificate obtained for ${DOMAIN}"
+        fi
     fi
+
+    ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/moodle-${slug}"
+    reload_nginx
 
     # ── Step 9: Run upgrade ────────────────────────────────────────────────
     step 9 10 "Moodle upgrade"

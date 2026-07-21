@@ -103,7 +103,7 @@ cmd_site_create() {
             5.1) MOODLE_BRANCH="MOODLE_501_STABLE" ;;
             4.5) MOODLE_BRANCH="MOODLE_405_STABLE" ;;
             4.4) MOODLE_BRANCH="MOODLE_404_STABLE" ;;
-            *)   MOODLE_BRANCH="MOODLE_$(echo "${MOODLE_VERSION}" | tr -d '.')_STABLE" ;;
+            *)   MOODLE_BRANCH="$(moodle_version_to_branch "${MOODLE_VERSION}")" ;;
         esac
     fi
 

@@ -262,6 +262,21 @@ detect_moodle_major() {
     echo "${major}"
 }
 
+# ---------------------------------------------------------------------------
+# Convert a "major.minor" version string to the correct Moodle git branch name
+# e.g. "4.5" -> "MOODLE_405_STABLE", "5.2" -> "MOODLE_502_STABLE"
+# The branch number is: major * 100 + minor
+# ---------------------------------------------------------------------------
+moodle_version_to_branch() {
+    local version="$1"
+    local major="${version%%.*}"
+    local minor="${version##*.}"
+    # Strip any extra segments (e.g. 4.5.1 → minor=5)
+    minor="${minor%%.*}"
+    local branch_num=$(( major * 100 + minor ))
+    echo "MOODLE_${branch_num}_STABLE"
+}
+
 # Returns: "traditional" or "public"
 detect_moodle_structure() {
     local moodle_dir="$1"

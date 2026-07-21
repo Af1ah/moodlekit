@@ -341,7 +341,7 @@ _do_fresh_provisioning() {
         spinner_stop 0 "Code extracted from archive"
     else
         # Clone fresh matching version
-        local branch="MOODLE_$(echo "${bk_moodle_version}" | tr -d '.')_STABLE"
+        local branch="$(moodle_version_to_branch "${bk_moodle_version}")"
         info "No code archive — cloning Moodle ${bk_moodle_version}..."
         git clone --depth 1 --branch "${branch}" \
             https://github.com/moodle/moodle.git "${MOODLE_DIR}"

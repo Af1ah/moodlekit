@@ -215,9 +215,9 @@ _restore_manual() {
     [[ -f "${dump_file}" ]] || { err "File not found: ${dump_file}"; exit 1; }
 
     local data_archive=""
-    input_path data_archive "Path to moodledata archive (.tar.gz) [leave blank to skip]" ""
-    if [[ -n "${data_archive}" && ! -f "${data_archive}" ]]; then
-        err "File not found: ${data_archive}"
+    input_path data_archive "Path to moodledata archive (.tar.gz) or raw data directory [leave blank to skip]" ""
+    if [[ -n "${data_archive}" && ! -f "${data_archive}" && ! -d "${data_archive}" ]]; then
+        err "Not found (file or directory): ${data_archive}"
         exit 1
     fi
 
@@ -351,10 +351,21 @@ _do_fresh_provisioning() {
     step 3 10 "Restore moodledata"
     mkdir -p "$(dirname "${MOODLEDATA_DIR}")"
     if [[ -f "${data_archive}" ]]; then
+        # Archive: extract .tar.gz
+        spinner_start "Extracting moodledata archive..."
         tar --extract --gzip \
             --file="${data_archive}" \
             --directory="$(dirname "${MOODLEDATA_DIR}")"
+        spinner_stop 0 "moodledata extracted"
+    elif [[ -d "${data_archive}" ]]; then
+        # Raw directory: copy in place
+        spinner_start "Copying raw moodledata directory..."
+        rm -rf "${MOODLEDATA_DIR}"
+        cp -a "${data_archive}" "${MOODLEDATA_DIR}"
+        spinner_stop 0 "moodledata copied"
     else
+        # Nothing provided: create an empty data dir
+        warn "No moodledata source provided — creating empty data directory."
         mkdir -p "${MOODLEDATA_DIR}"
     fi
     chown -R www-data:www-data "${MOODLEDATA_DIR}"

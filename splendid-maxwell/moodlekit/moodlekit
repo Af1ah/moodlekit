@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# =============================================================================
+# MoodleKit — Main CLI Entry Point
+# =============================================================================
+
+export MOODLEKIT_VERSION="1.0.0"
+export MOODLEKIT_ROOT="/opt/moodlekit"
+export MOODLEKIT_LIB="${MOODLEKIT_ROOT}/lib"
+export MOODLEKIT_CMD="${MOODLEKIT_ROOT}/commands"
+export MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
+
+export MOODLEKIT_STATE_DIR="/etc/moodlekit"
+export MOODLEKIT_SITES_DIR="${MOODLEKIT_STATE_DIR}/sites"
+export MOODLEKIT_OPT_DIR="/opt/moodlekit-data"
+export MOODLEKIT_BACKUP_DIR="/var/backups/moodlekit"
+
+# Options (parsed from global flags)
+export MOODLEKIT_YES=0
+
+# ---------------------------------------------------------------------------
+# Load libraries
+# ---------------------------------------------------------------------------
+if [[ ! -d "${MOODLEKIT_LIB}" ]]; then
+    # Dev mode fallback
+    MOODLEKIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    MOODLEKIT_LIB="${MOODLEKIT_ROOT}/lib"
+    MOODLEKIT_CMD="${MOODLEKIT_ROOT}/commands"
+    MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
+fi
+
+# shellcheck source=lib/common.sh
+source "${MOODLEKIT_LIB}/common.sh"
+# shellcheck source=lib/detect.sh
+source "${MOODLEKIT_LIB}/detect.sh"
+# shellcheck source=lib/interactive.sh
+source "${MOODLEKIT_LIB}/interactive.sh"
+# shellcheck source=lib/tuning.sh
+source "${MOODLEKIT_LIB}/tuning.sh"
+# shellcheck source=lib/db/postgres.sh
+source "${MOODLEKIT_LIB}/db/postgres.sh"
+# shellcheck source=lib/db/mariadb.sh
+source "${MOODLEKIT_LIB}/db/mariadb.sh"
+# shellcheck source=lib/db/mysql.sh
+source "${MOODLEKIT_LIB}/db/mysql.sh"
+
+# Load commands
+for cmd_file in "${MOODLEKIT_CMD}"/*.sh; do
+    # shellcheck source=/dev/null
+    [[ -f "${cmd_file}" ]] && source "${cmd_file}"
+done
+
+# ---------------------------------------------------------------------------
+# Global flag parser
+# ---------------------------------------------------------------------------
+parse_global_flags() {
+    local new_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -y|--yes)
+                MOODLEKIT_YES=1
+                shift
+                ;;
+            -v|--version)
+                echo "MoodleKit v${MOODLEKIT_VERSION}"
+                exit 0
+                ;;
+            -h|--help)
+                print_help
+                exit 0
+                ;;
+            *)
+                new_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    set -- "${new_args[@]}"
+    eval "args=(\"\$@\")"
+}
+
+# ---------------------------------------------------------------------------
+# Help string
+# ---------------------------------------------------------------------------
+print_help() {
+    cat << EOF
+MoodleKit v${MOODLEKIT_VERSION} — Moodle server and tenant management
+
+Usage: moodlekit [GLOBAL_FLAGS] <COMMAND> [ARGS...]
+
+Global Flags:
+  -y, --yes          Skip all confirmations (non-interactive mode)
+  -v, --version      Show version
+  -h, --help         Show this help
+
+Commands:
+  bootstrap          Provision the host server (PHP, Nginx, DB, Redis)
+  tune [mode]        Re-tune server performance (balanced, conservative, aggressive)
+  status             Show server health and hardware status
+
+Site Commands:
+  site create <slug> Create a new Moodle tenant
+  site remove <slug> Delete a tenant permanently
+  site list          List all managed tenants
+
+Backup & Restore:
+  backup <slug>      Create a local backup of a specific tenant
+  backup all         Create a local backup for all tenants
+  backup deploy      Deploy the Python cloud backup script + systemd timer
+  restore <slug> <backup_path>  Restore a site (in-place or fresh)
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Interactive Main Menu
+# ---------------------------------------------------------------------------
+
+# Helper: pick an existing site slug with arrow keys, or fallback to text input
+_pick_site_slug() {
+    local -n _slug_result="$1"
+    local prompt="$2"
+    local -a slugs
+    mapfile -t slugs < <(list_site_slugs 2>/dev/null)
+
+    if [[ ${#slugs[@]} -eq 0 ]]; then
+        warn "No managed sites found."
+        _slug_result=""
+        return 1
+    fi
+
+    select_one _slug_result "${prompt}" "${slugs[@]}"
+    return 0
+}
+
+_interactive_main_menu() {
+    section "MoodleKit — Main Menu"
+    local choice=""
+    select_one choice "Select an action:" \
+        "Site: Create a new tenant" \
+        "Site: List all tenants" \
+        "Site: Remove a tenant" \
+        "Site: Restore a tenant" \
+        "Backup: Single site" \
+        "Backup: All sites" \
+        "Backup: Deploy Cloud Sync" \
+        "Server: Status" \
+        "Server: Tune Performance" \
+        "Exit"
+
+    case "${choice}" in
+        *"Site: Create"*)
+            cmd_site_create
+            ;;
+
+        *"Site: List"*)
+            cmd_site_list
+            ;;
+
+        *"Site: Remove"*)
+            local rem_slug=""
+            if ! _pick_site_slug rem_slug "Select site to remove:"; then return; fi
+            cmd_site_remove "${rem_slug}"
+            ;;
+
+        *"Site: Restore"*)
+            local method_choice=""
+            select_one method_choice "Select restore method:" \
+                "Fresh restore from backup directory" \
+                "Manual / Legacy recovery (raw SQL + files)" \
+
+            if [[ "${method_choice}" == *"Manual"* ]]; then
+                cmd_restore "manual" ""
+            else
+                local rst_slug=""
+                input_text rst_slug "Slug for the restored site (e.g. mysite)" "" '^[a-z0-9]+$' "Lowercase alphanumeric only"
+                local backup_path=""
+                input_path backup_path "Absolute path to backup directory" ""
+                [[ -d "${backup_path}" ]] || { err "Backup directory not found: ${backup_path}"; return 1; }
+                cmd_restore "${rst_slug}" "${backup_path}"
+            fi
+            ;;
+
+        *"Backup: Single"*)
+            local bk_slug=""
+            if ! _pick_site_slug bk_slug "Select site to back up:"; then return; fi
+            cmd_backup_site "${bk_slug}"
+            ;;
+
+        *"Backup: All"*)
+            cmd_backup_all
+            ;;
+
+        *"Backup: Deploy"*)
+            cmd_backup_deploy
+            ;;
+
+        *"Server: Status"*)
+            cmd_status
+            ;;
+
+        *"Server: Tune"*)
+            local tune_mode=""
+            select_one tune_mode "Select tuning mode:" \
+                "balanced" "conservative" "aggressive"
+            cmd_tune "${tune_mode}"
+            ;;
+
+        *"Exit"*)
+            exit 0
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Main Router
+# ---------------------------------------------------------------------------
+main() {
+    parse_global_flags "$@"
+    set -- "${args[@]}"
+
+    local cmd="${1:-}"
+    local subcmd="${2:-}"
+    shift 2 2>/dev/null || shift 1 2>/dev/null || true
+
+    case "${cmd}" in
+        bootstrap)
+            cmd_bootstrap "$@"
+            ;;
+        tune)
+            cmd_tune "${subcmd}" "$@"
+            ;;
+        status)
+            cmd_status "$@"
+            ;;
+        site)
+            case "${subcmd}" in
+                create) cmd_site_create "$@" ;;
+                remove) cmd_site_remove "$@" ;;
+                list)   cmd_site_list "$@" ;;
+                *)      err "Unknown site command: ${subcmd}"; print_help; exit 1 ;;
+            esac
+            ;;
+        backup)
+            case "${subcmd}" in
+                all)    cmd_backup_all "$@" ;;
+                deploy) cmd_backup_deploy "$@" ;;
+                "")     err "Usage: moodlekit backup <slug|all|deploy>"; exit 1 ;;
+                *)      cmd_backup_site "${subcmd}" "$@" ;;
+            esac
+            ;;
+        restore)
+            # subcmd is slug here
+            cmd_restore "${subcmd}" "$@"
+            ;;
+        *)
+            if [[ -n "${cmd}" ]]; then
+                err "Unknown command: ${cmd}"
+                echo ""
+                print_help
+                exit 1
+            fi
+            
+            # If no command provided, go interactive
+            if [[ -f "${MOODLEKIT_STATE_DIR}/.bootstrap_complete" ]]; then
+                _interactive_main_menu
+            else
+                info "Server not bootstrapped yet. Starting bootstrap..."
+                cmd_bootstrap
+            fi
+            ;;
+    esac
+}
+
+main "$@"

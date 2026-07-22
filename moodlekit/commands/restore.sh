@@ -285,6 +285,7 @@ _do_fresh_provisioning() {
     local DB_NAME="moodle_${slug}"
     local DB_USER="moodle_${slug}"
     local DB_PASS="$(gen_password 24)"
+    local DB_PREFIX="mdl_"
     local IS_MOODLE5="${bk_is_moodle5}"
     local MOODLE_VERSION="${bk_moodle_version}"
     local PHP_VERSION="${bk_php_version:-${PHP_VERSION}}"
@@ -340,11 +341,13 @@ _do_fresh_provisioning() {
         local ex_db_user="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         local ex_db_pass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         local ex_domain="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 | sed 's|https://||' | sed 's|http://||' || true)"
+        local ex_db_prefix="$(grep -E "^\s*\\\$CFG->prefix\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         
         [[ -n "${ex_db_name}" ]] && DB_NAME="${ex_db_name}"
         [[ -n "${ex_db_user}" ]] && DB_USER="${ex_db_user}"
         [[ -n "${ex_db_pass}" ]] && DB_PASS="${ex_db_pass}"
         [[ -n "${ex_domain}" ]] && DOMAIN="${ex_domain}"
+        [[ -n "${ex_db_prefix}" ]] && DB_PREFIX="${ex_db_prefix}"
     fi
 
     # 3. Moodle Dir check
@@ -396,6 +399,21 @@ _do_fresh_provisioning() {
             mariadb)  db_maria_restore "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
             mysql)    db_mysql_restore  "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${actual_dump}" ;;
         esac
+    fi
+
+    # Auto-detect table prefix from the database (in case it was imported or exists)
+    local detected_prefix=""
+    case "${bk_db_type}" in
+        postgres)
+            detected_prefix=$(sudo -u postgres psql -t -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE '%config' LIMIT 1" "${DB_NAME}" 2>/dev/null | xargs || true)
+            ;;
+        mariadb|mysql)
+            detected_prefix=$(mysql -u root -sN -e "SELECT table_name FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name LIKE '%config' LIMIT 1;" 2>/dev/null || true)
+            ;;
+    esac
+    if [[ -n "${detected_prefix}" ]]; then
+        DB_PREFIX="${detected_prefix%config}"
+        info "Detected database table prefix: ${DB_PREFIX}"
     fi
 
     # ── Step 3: Download Moodle ────────────────────────────────────────────
@@ -514,6 +532,7 @@ _do_fresh_provisioning() {
         "DB_USER=${DB_USER}" \
         "DB_PASS=${DB_PASS}" \
         "DB_PORT=${DB_PORT}" \
+        "DB_PREFIX=${DB_PREFIX}" \
         "DOMAIN=${DOMAIN}" \
         "MOODLEDATA_DIR=${MOODLEDATA_DIR}" \
         "PHP_VERSION=${PHP_VERSION}" \

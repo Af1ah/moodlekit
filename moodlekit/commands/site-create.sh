@@ -92,6 +92,7 @@ cmd_site_create() {
     DB_NAME="moodle_${SLUG}"
     DB_USER="moodle_${SLUG}"
     DB_PASS="$(gen_password 24)"
+    DB_PREFIX="mdl_"
     ADMIN_PASS="$(gen_password_alnum 16)"
     DB_PORT="5432"
     [[ "${DB_TYPE}" == "mariadb" || "${DB_TYPE}" == "mysql" ]] && DB_PORT="3306"
@@ -199,11 +200,13 @@ cmd_site_create() {
         local ex_db_user="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         local ex_db_pass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         local ex_domain="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 | sed 's|https://||' | sed 's|http://||' || true)"
+        local ex_db_prefix="$(grep -E "^\s*\\\$CFG->prefix\s*=" "${MOODLE_DIR}/config.php" | cut -d"'" -f2 || true)"
         
         [[ -n "${ex_db_name}" ]] && DB_NAME="${ex_db_name}"
         [[ -n "${ex_db_user}" ]] && DB_USER="${ex_db_user}"
         [[ -n "${ex_db_pass}" ]] && DB_PASS="${ex_db_pass}"
         [[ -n "${ex_domain}" ]] && DOMAIN="${ex_domain}"
+        [[ -n "${ex_db_prefix}" ]] && DB_PREFIX="${ex_db_prefix}"
         
         if confirm "config.php exists. Skip running the Moodle installer?" "y"; then
             SKIP_INSTALLER=1

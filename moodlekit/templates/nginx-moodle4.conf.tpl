@@ -58,6 +58,15 @@ server {
     # ── Upload limits ─────────────────────────────────────────────────────────
     client_max_body_size 256M;
 
+    # ── Block sensitive paths ─────────────────────────────────────────────────
+    location ~ /\.                            { deny all; return 404; }
+    location ^~ /vendor/                      { deny all; return 404; }
+    location ^~ /node_modules/                { deny all; return 404; }
+    location ~* (composer\.(json|lock)|package\.json) { deny all; return 404; }
+    location ~* /(phpunit|behat)             { deny all; return 404; }
+    location ~* \.(md|txt|rst)$             { deny all; return 404; }
+    location = /config.php                   { deny all; return 404; }
+
     # ── Moodle 4.x routing: non-file requests → index.php ────────────────────
     location / {
         try_files $uri $uri/ /index.php?$args;
@@ -104,12 +113,5 @@ server {
         try_files $uri /index.php?$args;
     }
 
-    # ── Block sensitive paths ─────────────────────────────────────────────────
-    location ~ /\.                            { deny all; return 404; }
-    location ~ /vendor/                       { deny all; return 404; }
-    location ~ /node_modules/                 { deny all; return 404; }
-    location ~* (composer\.(json|lock)|package\.json) { deny all; return 404; }
-    location ~* /(phpunit|behat)             { deny all; return 404; }
-    location ~* \.(md|txt|rst)$             { deny all; return 404; }
-    location = /config.php                   { deny all; return 404; }
+
 }

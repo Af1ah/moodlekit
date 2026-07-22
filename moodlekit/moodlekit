@@ -101,6 +101,7 @@ Site Commands:
   site create <slug> Create a new Moodle tenant
   site remove <slug> Delete a tenant permanently
   site list          List all managed tenants
+  site upgrade <slug> Upgrade a Moodle tenant to a newer version
 
 Backup & Restore:
   backup <slug>      Create a local backup of a specific tenant
@@ -143,6 +144,7 @@ _interactive_main_menu() {
     select_one choice "Select an action:" \
         "Site: Create a new tenant" \
         "Site: List all tenants" \
+        "Site: Upgrade a tenant" \
         "Site: Remove a tenant" \
         "Site: Restore a tenant" \
         "Backup: Single site" \
@@ -165,6 +167,12 @@ _interactive_main_menu() {
             local rem_slug=""
             if ! _pick_site_slug rem_slug "Select site to remove:" "1"; then return; fi
             cmd_site_remove "${rem_slug}"
+            ;;
+
+        *"Site: Upgrade"*)
+            local upg_slug=""
+            if ! _pick_site_slug upg_slug "Select site to upgrade:"; then return; fi
+            cmd_site_upgrade "${upg_slug}"
             ;;
 
         *"Site: Restore"*)
@@ -239,10 +247,11 @@ main() {
             ;;
         site)
             case "${subcmd}" in
-                create) cmd_site_create "$@" ;;
-                remove) cmd_site_remove "$@" ;;
-                list)   cmd_site_list "$@" ;;
-                *)      err "Unknown site command: ${subcmd}"; print_help; exit 1 ;;
+                create)  cmd_site_create "$@" ;;
+                remove)  cmd_site_remove "$@" ;;
+                list)    cmd_site_list "$@" ;;
+                upgrade) cmd_site_upgrade "$@" ;;
+                *)       err "Unknown site command: ${subcmd}"; print_help; exit 1 ;;
             esac
             ;;
         backup)

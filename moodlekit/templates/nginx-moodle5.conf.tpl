@@ -59,6 +59,21 @@ server {
     # ── Upload limits (matching PHP ini) ─────────────────────────────────────
     client_max_body_size 256M;
 
+    # ── Block access to sensitive paths ──────────────────────────────────────
+    # Hidden files (.git, .env, .htaccess)
+    location ~ /\.                              { deny all; return 404; }
+    # Moodle 5.x: vendor/node_modules are outside public/ but block if found
+    location ^~ /vendor/                        { deny all; return 404; }
+    location ^~ /node_modules/                  { deny all; return 404; }
+    # Composer/npm metadata
+    location ~* (composer\.(json|lock)|package\.json|yarn\.lock) { deny all; return 404; }
+    # PHPUnit & Behat
+    location ~* /(phpunit|behat)               { deny all; return 404; }
+    # Readme / changelogs
+    location ~* \.(md|txt|rst)$               { deny all; return 404; }
+    # config.php is outside public/ in Moodle 5.x — but guard anyway
+    location = /config.php                     { deny all; return 404; }
+
     # ── Moodle 5.x Router: all non-file requests → r.php ─────────────────────
     location / {
         try_files $uri $uri/ /r.php?$args;
@@ -110,18 +125,5 @@ server {
         try_files $uri /r.php?$args;
     }
 
-    # ── Block access to sensitive paths ──────────────────────────────────────
-    # Hidden files (.git, .env, .htaccess)
-    location ~ /\.                              { deny all; return 404; }
-    # Moodle 5.x: vendor/node_modules are outside public/ but block if found
-    location ~ /vendor/                         { deny all; return 404; }
-    location ~ /node_modules/                   { deny all; return 404; }
-    # Composer/npm metadata
-    location ~* (composer\.(json|lock)|package\.json|yarn\.lock) { deny all; return 404; }
-    # PHPUnit & Behat
-    location ~* /(phpunit|behat)               { deny all; return 404; }
-    # Readme / changelogs
-    location ~* \.(md|txt|rst)$               { deny all; return 404; }
-    # config.php is outside public/ in Moodle 5.x — but guard anyway
-    location = /config.php                     { deny all; return 404; }
+
 }

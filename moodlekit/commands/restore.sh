@@ -98,19 +98,19 @@ _restore_inplace() {
     section "Restore Method 1: In-place into '${slug}'"
     warn "This will REPLACE the database and moodledata for '${slug}'."
     confirm "Proceed?" "y"    # Define paths
-    local admin_cli="${MOODLE_DIR}/$([ "${IS_MOODLE5:-0}" -eq 1 ] && echo "public/")admin/cli"
+    local admin_cli="${MOODLE_DIR}/admin/cli"
     local dump_file="${backup_path}/database.sql.gz"
     local data_archive="${backup_path}/moodledata.tar.gz"
 
     # ── Step 1: Maintenance mode ───────────────────────────────────────────
-    step 1 6 "Enable maintenance mode"
+    step 1 8 "Enable maintenance mode"
     [[ -f "${admin_cli}/maintenance.php" ]] && \
         sudo -u www-data "/usr/bin/php${PHP_VERSION}" \
         "${admin_cli}/maintenance.php" --enable 2>/dev/null || true
     ok "Maintenance mode ON"
 
     # ── Step 2: Restore database ───────────────────────────────────────────
-    step 2 6 "Restore database"
+    step 2 8 "Restore database"
     [[ -f "${dump_file}" ]] || { err "No database.sql.gz in backup"; exit 1; }
 
     case "${DB_TYPE}" in
@@ -137,7 +137,7 @@ _restore_inplace() {
     esac
 
     # ── Step 3: Restore moodledata ─────────────────────────────────────────
-    step 3 6 "Restore moodledata"
+    step 3 8 "Restore moodledata"
     if [[ -f "${data_archive}" ]]; then
         spinner_start "Extracting moodledata..."
         rm -rf "${MOODLEDATA_DIR}"
@@ -152,13 +152,13 @@ _restore_inplace() {
     fi
 
     # ── Step 4: Purge caches ───────────────────────────────────────────────
-    step 4 6 "Purge caches"
+    step 4 8 "Purge caches"
     sudo -u www-data "/usr/bin/php${PHP_VERSION}" \
         "${admin_cli}/purge_caches.php" 2>/dev/null || true
     ok "Caches purged"
 
     # ── Step 5: Upgrade if version differs ────────────────────────────────
-    step 5 6 "Run upgrade check"
+    step 5 8 "Run upgrade check"
     if [[ "${bk_moodle_version}" != "${MOODLE_VERSION}" ]]; then
         warn "Version mismatch (backup: ${bk_moodle_version}, current: ${MOODLE_VERSION})"
         info "Running Moodle upgrade..."
@@ -168,8 +168,25 @@ _restore_inplace() {
         ok "No upgrade needed (same version)"
     fi
 
-    # ── Step 6: Disable maintenance ────────────────────────────────────────
-    step 6 6 "Disable maintenance mode"
+    # ── Step 6: Update Nginx config ────────────────────────────────────────
+    step 6 8 "Update Nginx configuration"
+    local nginx_tpl="${MOODLEKIT_TPL}/nginx-moodle4.conf.tpl"
+    [[ "${IS_MOODLE5:-0}" -eq 1 ]] && nginx_tpl="${MOODLEKIT_TPL}/nginx-moodle5.conf.tpl"
+    
+    render_template_to_file "${nginx_tpl}" "${NGINX_CONF}" \
+        "DOMAIN=${DOMAIN}" "MOODLE_DIR=${MOODLE_DIR}" \
+        "MOODLEDATA_DIR=${MOODLEDATA_DIR}" "PHP_VERSION=${PHP_VERSION}" "SLUG=${slug}"
+    reload_nginx
+    ok "Nginx configuration updated"
+
+    # ── Step 7: Cron + Task Processing ─────────────────────────────────────
+    step 7 8 "Configure Cron"
+    _configure_task_processing "${admin_cli}"
+    _configure_cron "${slug}" "${MOODLE_DIR}" "${IS_MOODLE5}"
+    ok "Cron configured"
+
+    # ── Step 8: Disable maintenance ────────────────────────────────────────
+    step 8 8 "Disable maintenance mode"
     sudo -u www-data "/usr/bin/php${PHP_VERSION}" \
         "${admin_cli}/maintenance.php" --disable 2>/dev/null || true
     ok "Site '${slug}' restored and online"
@@ -293,7 +310,7 @@ _do_fresh_provisioning() {
     local NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
     local FPM_SOCK="/run/php/php${PHP_VERSION}-fpm-moodle_${slug}.sock"
     local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
-    local ADMIN_CLI="${MOODLE_DIR}/$([ "${IS_MOODLE5}" -eq 1 ] && echo "public/")admin/cli"
+    local ADMIN_CLI="${MOODLE_DIR}/admin/cli"
 
     # ── Resume detection ───────────────────────────────────────────────────
     local SKIP_DB_PROVISION=0

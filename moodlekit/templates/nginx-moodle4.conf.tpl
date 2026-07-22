@@ -106,12 +106,6 @@ server {
         alias {{MOODLEDATA_DIR}}/;
     }
 
-    # ── Static assets ─────────────────────────────────────────────────────────
-    location ~* \.(css|js|gif|png|jpg|jpeg|ico|svg|woff|woff2|ttf|eot|mp4|webm|pdf)$ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-        try_files $uri /index.php?$args;
-    }
-
+    # Static assets caching removed as per user request.
 
 }

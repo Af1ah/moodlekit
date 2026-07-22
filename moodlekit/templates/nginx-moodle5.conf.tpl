@@ -118,12 +118,6 @@ server {
         alias {{MOODLEDATA_DIR}}/;
     }
 
-    # ── Static assets: long cache (Moodle uses content-hash filenames) ────────
-    location ~* \.(css|js|gif|png|jpg|jpeg|ico|svg|woff|woff2|ttf|eot|mp4|webm|pdf)$ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-        try_files $uri /r.php?$args;
-    }
-
+    # Static assets caching removed as per user request.
 
 }

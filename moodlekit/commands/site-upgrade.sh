@@ -51,7 +51,6 @@ cmd_site_upgrade() {
     fi
 
     warn "Upgrading from ${MOODLE_VERSION} to ${TARGET_VER}."
-    warn "Direct major upgrades (e.g. 4.1 to 5.2) may conflict. Use staging if needed."
     confirm "Are you sure you want to proceed?" "y" || exit 0
     
     local BACKUP_CODE=1
@@ -98,21 +97,21 @@ cmd_site_upgrade() {
     
     step 4 7 "Download Moodle ${TARGET_VER}"
     spinner_start "Cloning Moodle ${TARGET_VER}..."
-    git clone --depth 1 --branch "${TARGET_BRANCH}" https://github.com/moodle/moodle.git "${MOODLE_DIR}"
+    git clone --depth 1 --branch "${TARGET_BRANCH}" https://github.com/moodle/moodle.git "${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1
     
     local composer_json="${MOODLE_DIR}/composer.json"
     if [[ -f "${composer_json}" ]]; then
         COMPOSER_ALLOW_SUPERUSER=1 composer install \
             --no-dev --optimize-autoloader --no-interaction \
-            --working-dir="${MOODLE_DIR}" 2>&1 | tee -a "${_LOG_FILE}"
+            --working-dir="${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1
     fi
     
     cp "${tmp_config}" "${MOODLE_DIR}/config.php"
     rm -f "${tmp_config}"
     
     chown -R root:www-data "${MOODLE_DIR}"
-    find "${MOODLE_DIR}" -type d -exec chmod 755 {} \;
-    find "${MOODLE_DIR}" -type f -exec chmod 644 {} \;
+    find "${MOODLE_DIR}" -type d -exec chmod 755 {} +
+    find "${MOODLE_DIR}" -type f -exec chmod 644 {} +
     chown root:www-data "${MOODLE_DIR}/config.php"
     chmod 640 "${MOODLE_DIR}/config.php"
     spinner_stop 0 "Code downloaded and permissions set"

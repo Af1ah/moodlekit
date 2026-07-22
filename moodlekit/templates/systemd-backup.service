@@ -9,9 +9,9 @@ Type=oneshot
 User=root
 Group=root
 
-ExecStart=/usr/bin/python3 /opt/moodlekit/backup/moodle_backup.py \
-    --config /opt/moodlekit/backup/config.json \
-    --secrets /opt/moodlekit/backup/secrets.json
+ExecStart=/usr/bin/python3 /opt/moodlekit-data/backup/moodle_backup.py \
+    --config /opt/moodlekit-data/backup/config.json \
+    --secrets /opt/moodlekit-data/backup/secrets.json
 
 # Prevent OOM kills on this job
 OOMScoreAdjust=-100

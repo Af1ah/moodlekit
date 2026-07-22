@@ -33,10 +33,10 @@ cmd_site_upgrade() {
     local TARGET_BRANCH
     local IS_TARGET_MOODLE5=0
     
-    if [[ "${target_version}" == *"4.5"* ]]; then
+    if [[ "${target_version}" == 4.5* ]]; then
         TARGET_VER="4.5"
         TARGET_BRANCH="MOODLE_405_STABLE"
-    elif [[ "${target_version}" == *"5.2"* ]]; then
+    elif [[ "${target_version}" == 5.2* ]]; then
         TARGET_VER="5.2"
         TARGET_BRANCH="MOODLE_502_STABLE"
         IS_TARGET_MOODLE5=1

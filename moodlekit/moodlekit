@@ -275,12 +275,11 @@ main() {
             fi
             
             # If no command provided, go interactive
-            if [[ -f "${MOODLEKIT_STATE_DIR}/.bootstrap_complete" ]]; then
-                _interactive_main_menu
-            else
-                info "Server not bootstrapped yet. Starting bootstrap..."
-                cmd_bootstrap
+            if [[ ! -f "${MOODLEKIT_STATE_DIR}/.bootstrap_complete" ]]; then
+                warn "Server not bootstrapped yet. Some features may not work."
+                echo ""
             fi
+            _interactive_main_menu
             ;;
     esac
 }

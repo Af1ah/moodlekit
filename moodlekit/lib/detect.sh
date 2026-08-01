@@ -91,27 +91,27 @@ detect_installed() {
     fi
 
     # ── PostgreSQL ──
-    PG_INSTALLED=""
-    PG_INSTALLED_VERSION=""
+    POSTGRES_INSTALLED=""
+    POSTGRES_INSTALLED_VERSION=""
     if command -v psql &>/dev/null 2>&1; then
-        PG_INSTALLED_VERSION="$(psql --version 2>/dev/null | awk '{print $3}')"
-        PG_INSTALLED="${PG_INSTALLED_VERSION%%.*}"
-        INSTALLED_TOOLS+=("PostgreSQL ${PG_INSTALLED_VERSION}")
+        POSTGRES_INSTALLED_VERSION="$(psql --version 2>/dev/null | awk '{print $3}')"
+        POSTGRES_INSTALLED="${POSTGRES_INSTALLED_VERSION%%.*}"
+        INSTALLED_TOOLS+=("PostgreSQL ${POSTGRES_INSTALLED_VERSION}")
     fi
 
     # ── MariaDB ──
-    MARIA_INSTALLED=""
-    MARIA_INSTALLED_VERSION=""
+    MARIADB_INSTALLED=""
+    MARIADB_INSTALLED_VERSION=""
     if command -v mariadb &>/dev/null 2>&1; then
-        MARIA_INSTALLED_VERSION="$(mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-        MARIA_INSTALLED="${MARIA_INSTALLED_VERSION%%.*}"
-        INSTALLED_TOOLS+=("MariaDB ${MARIA_INSTALLED_VERSION}")
+        MARIADB_INSTALLED_VERSION="$(mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        MARIADB_INSTALLED="${MARIADB_INSTALLED_VERSION%%.*}"
+        INSTALLED_TOOLS+=("MariaDB ${MARIADB_INSTALLED_VERSION}")
     fi
 
     # ── MySQL ──
     MYSQL_INSTALLED=""
     MYSQL_INSTALLED_VERSION=""
-    if command -v mysql &>/dev/null 2>&1 && [[ -z "${MARIA_INSTALLED}" ]]; then
+    if command -v mysql &>/dev/null 2>&1 && [[ -z "${MARIADB_INSTALLED}" ]]; then
         MYSQL_INSTALLED_VERSION="$(mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
         MYSQL_INSTALLED="${MYSQL_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("MySQL ${MYSQL_INSTALLED_VERSION}")

@@ -17,7 +17,12 @@ db_maria_install() {
     if command -v mariadb &>/dev/null; then
         local existing_ver
         existing_ver="$(mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-        ok "MariaDB ${existing_ver} already installed — skipping"
+        if dpkg --compare-versions "${existing_ver}" "lt" "${maria_ver}"; then
+            warn "MariaDB ${existing_ver} is installed, but version ${maria_ver} or higher is required."
+            warn "Please upgrade MariaDB manually or select a different database engine."
+            exit 1
+        fi
+        ok "MariaDB ${existing_ver} already installed (>= ${maria_ver}) — skipping"
         return 0
     fi
 

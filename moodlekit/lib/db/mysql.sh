@@ -18,7 +18,12 @@ db_mysql_install() {
     if command -v mysql &>/dev/null && ! command -v mariadb &>/dev/null; then
         local existing_ver
         existing_ver="$(mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-        ok "MySQL ${existing_ver} already installed — skipping"
+        if dpkg --compare-versions "${existing_ver}" "lt" "${mysql_ver}"; then
+            warn "MySQL ${existing_ver} is installed, but version ${mysql_ver} or higher is required."
+            warn "Please upgrade MySQL manually or select a different database engine."
+            exit 1
+        fi
+        ok "MySQL ${existing_ver} already installed (>= ${mysql_ver}) — skipping"
         return 0
     fi
 

@@ -24,7 +24,7 @@ cmd_bootstrap() {
     # Check if already bootstrapped
     if [[ -f "${MOODLEKIT_STATE_DIR}/.bootstrap_complete" ]]; then
         warn "This server was already bootstrapped."
-        if ! confirm "Re-run bootstrap? (safe — skips installed components)" "n"; then
+        if ! confirm "Re-run bootstrap for tuning/fixing? (allows installing new PHP versions or re-tuning)" "n"; then
             info "Aborted."
             exit 0
         fi
@@ -39,45 +39,60 @@ cmd_bootstrap() {
     local php_ver=""
     if [[ -n "${OPT_PHP:-}" ]]; then
         php_ver="${OPT_PHP}"
-    elif [[ -n "${PHP_INSTALLED:-}" ]]; then
+    elif [[ -n "${PHP_INSTALLED:-}" ]] && [[ "${MOODLEKIT_YES:-0}" == "1" ]]; then
         php_ver="${PHP_INSTALLED}"
         info "Auto-selected PHP ${php_ver} (already installed)"
     else
         local php_choice=""
-        select_one php_choice "Select PHP version:" \
+        local prompt_msg="Select PHP version:"
+        if [[ -n "${PHP_INSTALLED:-}" ]]; then
+            prompt_msg="Select PHP version (Currently installed: ${PHP_INSTALLED}):"
+        fi
+        select_one php_choice "${prompt_msg}" \
             "PHP 8.4 (recommended for Moodle 5.2)" \
             "PHP 8.3 (Moodle 4.5 LTS + Moodle 5.2)" \
-            "PHP 8.1 (Moodle 4.5 LTS only)"
+            "PHP 8.1 (Moodle 4.5 LTS only)" \
+            "Keep Current (${PHP_INSTALLED:-None})"
         case "${php_choice}" in
             *8.4*) php_ver="8.4" ;;
             *8.3*) php_ver="8.3" ;;
             *8.1*) php_ver="8.1" ;;
+            *Keep*) php_ver="${PHP_INSTALLED}" ;;
         esac
+        # Fallback if Keep Current was selected but nothing installed
+        [[ -z "${php_ver}" ]] && php_ver="8.4"
     fi
 
     # Database
     local db_type=""
     if [[ -n "${OPT_DB:-}" ]]; then
         db_type="${OPT_DB}"
-    elif [[ -n "${POSTGRES_INSTALLED:-}" ]]; then
-        db_type="postgres"
-        info "Auto-selected PostgreSQL (already installed)"
-    elif [[ -n "${MARIADB_INSTALLED:-}" ]]; then
-        db_type="mariadb"
-        info "Auto-selected MariaDB (already installed)"
-    elif [[ -n "${MYSQL_INSTALLED:-}" ]]; then
-        db_type="mysql"
-        info "Auto-selected MySQL (already installed)"
+    elif [[ -n "${POSTGRES_INSTALLED:-}" || -n "${MARIADB_INSTALLED:-}" || -n "${MYSQL_INSTALLED:-}" ]] && [[ "${MOODLEKIT_YES:-0}" == "1" ]]; then
+        if [[ -n "${POSTGRES_INSTALLED:-}" ]]; then db_type="postgres"; info "Auto-selected PostgreSQL (already installed)";
+        elif [[ -n "${MARIADB_INSTALLED:-}" ]]; then db_type="mariadb"; info "Auto-selected MariaDB (already installed)";
+        elif [[ -n "${MYSQL_INSTALLED:-}" ]]; then db_type="mysql"; info "Auto-selected MySQL (already installed)"; fi
     else
+        local db_installed_msg="None"
+        if [[ -n "${POSTGRES_INSTALLED:-}" ]]; then db_installed_msg="PostgreSQL";
+        elif [[ -n "${MARIADB_INSTALLED:-}" ]]; then db_installed_msg="MariaDB";
+        elif [[ -n "${MYSQL_INSTALLED:-}" ]]; then db_installed_msg="MySQL"; fi
+
         local db_choice=""
-        select_one db_choice "Select database engine:" \
+        select_one db_choice "Select database engine (Currently installed: ${db_installed_msg}):" \
             "PostgreSQL 17 (recommended)" \
             "MariaDB 10.11+" \
-            "MySQL 8.4"
+            "MySQL 8.4" \
+            "Keep Current (${db_installed_msg})"
         case "${db_choice}" in
             *PostgreSQL*) db_type="postgres" ;;
             *MariaDB*)    db_type="mariadb"  ;;
             *MySQL*)      db_type="mysql"    ;;
+            *Keep*)
+                if [[ "${db_installed_msg}" == "PostgreSQL" ]]; then db_type="postgres";
+                elif [[ "${db_installed_msg}" == "MariaDB" ]]; then db_type="mariadb";
+                elif [[ "${db_installed_msg}" == "MySQL" ]]; then db_type="mysql";
+                else db_type="postgres"; fi
+                ;;
         esac
     fi
 
@@ -91,13 +106,18 @@ cmd_bootstrap() {
             [[ "${c}" == *Memcached* ]] && use_memcached=1
             [[ "${c}" == "None"   ]] && use_redis=0 && use_memcached=0
         done
-    elif [[ -n "${REDIS_INSTALLED:-}" ]] || [[ -n "${MEMCACHED_INSTALLED:-}" ]]; then
+    elif [[ -n "${REDIS_INSTALLED:-}" || -n "${MEMCACHED_INSTALLED:-}" ]] && [[ "${MOODLEKIT_YES:-0}" == "1" ]]; then
         [[ -n "${REDIS_INSTALLED:-}" ]] && use_redis=1
         [[ -n "${MEMCACHED_INSTALLED:-}" ]] && use_memcached=1
         info "Auto-selected existing cache layers: Redis($use_redis), Memcached($use_memcached)"
     else
+        local current_cache=""
+        [[ -n "${REDIS_INSTALLED:-}" ]] && current_cache="Redis"
+        [[ -n "${MEMCACHED_INSTALLED:-}" ]] && current_cache="${current_cache} Memcached"
+        [[ -z "${current_cache}" ]] && current_cache="None"
+
         local cache_choices=()
-        select_many cache_choices "Select caching stack:" \
+        select_many cache_choices "Select caching stack (Currently installed: ${current_cache}):" \
             "Redis (sessions + MUC — recommended)" \
             "Memcached (MUC application cache)" \
             "None"

@@ -93,7 +93,7 @@ cmd_site_create() {
     DB_USER="moodle_${SLUG}"
     DB_PASS="$(gen_password 24)"
     DB_PREFIX="mdl_"
-    ADMIN_PASS="$(gen_password_alnum 16)"
+    ADMIN_PASS="M00dle123#"
     DB_PORT="5432"
     [[ "${DB_TYPE}" == "mariadb" || "${DB_TYPE}" == "mysql" ]] && DB_PORT="3306"
 

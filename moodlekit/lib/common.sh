@@ -436,11 +436,11 @@ load_global_conf() {
     fi
     # Provide safe fallback defaults so status and diagnostic tools never crash
     BASE_DOMAIN="${BASE_DOMAIN:-}"
-    PHP_VERSION="${PHP_VERSION:-8.3}"
-    DB_TYPE="${DB_TYPE:-postgres}"
+    PHP_VERSION="${PHP_VERSION:-8.4}"
+    DB_TYPE="${DB_TYPE:-mariadb}"
     USE_REDIS="${USE_REDIS:-0}"
     USE_MEMCACHED="${USE_MEMCACHED:-0}"
-    return 1
+    return 0
 }
 
 load_site_conf() {
@@ -518,7 +518,22 @@ load_site_conf() {
         [[ -n "${avail}" ]] && err "Available sites: ${avail}"
         exit 1
     fi
-    return 1
+    export SLUG="${slug}"
+    export DOMAIN="${slug}"
+    export MOODLE_DIR="/var/www/moodle/${slug}"
+    export MOODLEDATA_DIR="/var/moodledata/${slug}"
+    export DB_TYPE="mariadb"
+    export DB_NAME="moodle_${slug}"
+    export DB_USER="moodle_${slug}"
+    export DB_PASS=""
+    export DB_PREFIX="mdl_"
+    export PHP_VERSION="${PHP_VERSION:-8.4}"
+    export MOODLE_VERSION="4.5"
+    export IS_MOODLE5="0"
+    export SITE_TYPE="standalone"
+    export NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
+    export FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
+    return 0
 }
 
 list_site_slugs() {

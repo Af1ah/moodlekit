@@ -28,7 +28,7 @@ cmd_site_remove() {
     fi
 
     if [[ "${is_partial}" -eq 0 ]]; then
-        load_site_conf "${SLUG}"
+        load_site_conf "${SLUG}" 0
     else
         # Provide default variables so the teardown script can attempt to clean up
         DOMAIN="${SLUG}.${BASE_DOMAIN}"

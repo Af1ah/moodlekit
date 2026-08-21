@@ -22,7 +22,7 @@ cmd_site_upgrade() {
     fi
 
     site_exists "${SLUG}" || { err "Site '${SLUG}' not found in MoodleKit encrypted vault."; exit 1; }
-    load_site_conf "${SLUG}"
+    load_site_conf "${SLUG}" 0
     
     init_logging "site-upgrade-${SLUG}"
     acquire_lock "site-${SLUG}"

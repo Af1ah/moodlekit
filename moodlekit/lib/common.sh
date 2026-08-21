@@ -287,13 +287,13 @@ find_moodle_config_file() {
     fi
 }
 
-# Resolves path to admin/cli directory
+# Resolves path to admin/cli directory (in both Moodle 4.x and 5.1+, CLI scripts remain in moodle/admin/cli/*.php)
 find_moodle_admin_cli() {
     local moodle_dir="$1"
-    if [[ -d "${moodle_dir}/public/admin/cli" ]]; then
-        echo "${moodle_dir}/public/admin/cli"
-    elif [[ -d "${moodle_dir}/admin/cli" ]]; then
+    if [[ -d "${moodle_dir}/admin/cli" ]]; then
         echo "${moodle_dir}/admin/cli"
+    elif [[ -d "${moodle_dir}/public/admin/cli" ]]; then
+        echo "${moodle_dir}/public/admin/cli"
     else
         echo "${moodle_dir}/admin/cli"
     fi

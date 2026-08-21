@@ -463,8 +463,8 @@ _fix_cron() {
     step 1 1 "Configuring Cron Job & Clearing Stalled Tasks"
     local target_php="${PHP_VERSION:-8.3}"
     local cron_file="/etc/cron.d/moodlekit-${slug}"
-    local admin_cli="${MOODLE_DIR}/admin/cli"
-    [[ "${IS_MOODLE5:-0}" == "1" && -d "${MOODLE_DIR}/public" ]] && admin_cli="${MOODLE_DIR}/public/admin/cli"
+    local admin_cli
+    admin_cli="$(find_moodle_admin_cli "${MOODLE_DIR}")"
     
     # Remove stale lock files
     rm -f "/tmp/moodlekit-${slug}.lock"
@@ -485,8 +485,8 @@ _fix_cache() {
     local slug="$1"
     step 1 1 "Purging Caches & Disabling Maintenance Mode"
     local target_php="${PHP_VERSION:-8.3}"
-    local admin_cli="${MOODLE_DIR}/admin/cli"
-    [[ "${IS_MOODLE5:-0}" == "1" && -d "${MOODLE_DIR}/public" ]] && admin_cli="${MOODLE_DIR}/public/admin/cli"
+    local admin_cli
+    admin_cli="$(find_moodle_admin_cli "${MOODLE_DIR}")"
     
     if [[ -f "${admin_cli}/purge_caches.php" ]]; then
         sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/purge_caches.php" >/dev/null 2>&1 || true

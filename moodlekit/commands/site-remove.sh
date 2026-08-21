@@ -67,7 +67,8 @@ cmd_site_remove() {
     # Step 1 — Maintenance mode
     # ─────────────────────────────────────────────────────────────────────────
     step 1 9 "Enable maintenance mode"
-    local admin_cli="${MOODLE_DIR}/$([ "${IS_MOODLE5:-0}" -eq 1 ] && echo "public/")admin/cli"
+    local admin_cli
+    admin_cli="$(find_moodle_admin_cli "${MOODLE_DIR}")"
     if [[ -f "${admin_cli}/maintenance.php" ]]; then
         sudo -u www-data "/usr/bin/php${PHP_VERSION}" \
             "${admin_cli}/maintenance.php" --enable 2>/dev/null || true

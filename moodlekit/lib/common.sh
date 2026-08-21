@@ -311,26 +311,39 @@ get_moodle_docroot() {
     fi
 }
 
-# Checks whether directory is a genuine Moodle installation (supports 4.x and 5.x)
+# Checks whether directory is a genuine Moodle root installation (supports 4.x and 5.x)
 is_moodle_directory() {
     local moodle_dir="$1"
     [[ ! -d "${moodle_dir}" ]] && return 1
     
-    local vfile cfgfile
-    vfile="$(find_moodle_version_file "${moodle_dir}")"
-    cfgfile="$(find_moodle_config_file "${moodle_dir}")"
-    
-    if [[ -n "${vfile}" && -f "${vfile}" ]]; then
-        return 0
+    # 1. STRICT EXCLUSION: Never treat plugin/subsystem subdirectories as Moodle roots
+    if [[ "${moodle_dir}" =~ /(blocks|mod|theme|enrol|auth|filter|report|repository|local|dataformat|portfolio|webservice|question|availability|grade|message|media|cache|backup|payment)/ ]]; then
+        return 1
     fi
+    
+    # 2. Check for config.php (root or public/) with Moodle config markers
+    local cfgfile
+    cfgfile="$(find_moodle_config_file "${moodle_dir}")"
     if [[ -n "${cfgfile}" && -f "${cfgfile}" ]]; then
-        if grep -qE "(\\\$CFG->db|\$CFG->wwwroot|\$CFG->dataroot|setup\.php)" "${cfgfile}" 2>/dev/null; then
+        if grep -qE "(\\\$CFG->|setup\.php)" "${cfgfile}" 2>/dev/null; then
             return 0
         fi
     fi
+    
+    # 3. Check for core Moodle setup.php
     if [[ -f "${moodle_dir}/lib/setup.php" || -f "${moodle_dir}/public/lib/setup.php" ]]; then
         return 0
     fi
+    
+    # 4. Check for core Moodle version.php (must have $release = and NOT be a plugin)
+    local vfile
+    vfile="$(find_moodle_version_file "${moodle_dir}")"
+    if [[ -n "${vfile}" && -f "${vfile}" ]]; then
+        if grep -qE '^\$release\s*=' "${vfile}" 2>/dev/null && ! grep -qE '^\$plugin->' "${vfile}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
     return 1
 }
 
@@ -480,25 +493,13 @@ site_exists() {
 # Moodle Site Discovery (Auto-detect standalone & unmanaged Moodle sites)
 # ---------------------------------------------------------------------------
 find_moodle_installations() {
-    local search_dirs=("/var/www" "/var/www/html" "/var/www/moodle" "/home" "/opt")
+    local search_dirs=("/var/www" "/var/www/html" "/var/www/moodle" "/home" "/opt" "/var/www/vhosts")
     local found_dirs=()
 
     for base in "${search_dirs[@]}"; do
         [[ -d "${base}" ]] || continue
-        # Find directories with version.php
-        while IFS= read -r vfile; do
-            local mdir
-            mdir="$(dirname "${vfile}")"
-            # If version.php is in public/, the Moodle root is parent
-            if [[ "$(basename "${mdir}")" == "public" && -d "$(dirname "${mdir}")" ]]; then
-                mdir="$(dirname "${mdir}")"
-            fi
-            if is_moodle_directory "${mdir}"; then
-                found_dirs+=("${mdir}")
-            fi
-        done < <(find "${base}" -maxdepth 5 -name "version.php" -type f 2>/dev/null)
 
-        # Also find directories with config.php
+        # 1. Discover sites by config.php
         while IFS= read -r cfile; do
             local cdir
             cdir="$(dirname "${cfile}")"
@@ -508,7 +509,27 @@ find_moodle_installations() {
             if is_moodle_directory "${cdir}"; then
                 found_dirs+=("${cdir}")
             fi
-        done < <(find "${base}" -maxdepth 5 -name "config.php" -type f 2>/dev/null)
+        done < <(find "${base}" -maxdepth 4 -name "config.php" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/vendor/*" \
+            -not -path "*/cache/*" \
+            -not -path "*/localcache/*" \
+            -not -path "*/sessions/*" \
+            -not -path "*/temp/*" 2>/dev/null)
+
+        # 2. Discover sites by core lib/setup.php
+        while IFS= read -r sfile; do
+            local libdir="$(dirname "${sfile}")"
+            local sdir="$(dirname "${libdir}")"
+            if [[ "$(basename "${sdir}")" == "public" && -d "$(dirname "${sdir}")" ]]; then
+                sdir="$(dirname "${sdir}")"
+            fi
+            if is_moodle_directory "${sdir}"; then
+                found_dirs+=("${sdir}")
+            fi
+        done < <(find "${base}" -maxdepth 4 -path "*/lib/setup.php" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/vendor/*" 2>/dev/null)
     done
 
     # Print unique directories

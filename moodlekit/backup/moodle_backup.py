@@ -458,6 +458,17 @@ def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
     result: List[Path] = []
 
     def add_site(path_obj: Path):
+        # Disqualify plugin or internal subsystem paths
+        s_path = str(path_obj)
+        for sub in [
+            "/blocks/", "/mod/", "/theme/", "/enrol/", "/auth/", "/filter/",
+            "/report/", "/repository/", "/local/", "/dataformat/", "/portfolio/",
+            "/webservice/", "/question/", "/availability/", "/grade/", "/message/",
+            "/media/", "/cache/", "/backup/", "/payment/"
+        ]:
+            if sub in s_path:
+                return
+
         # Support both traditional and Moodle 5.1+ public/ layouts
         cfg = path_obj / "config.php"
         if not cfg.exists() and (path_obj / "public" / "config.php").exists():

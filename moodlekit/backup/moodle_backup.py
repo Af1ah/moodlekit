@@ -453,21 +453,26 @@ def domain_from_wwwroot(wwwroot: Optional[str], fallback: str) -> str:
         return fallback
 
 def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
-    """Combine vault sites, config.json sites, and disk-scanned sites."""
+    """Combine configured sites, vault sites, and disk-scanned sites."""
     seen_configs = set()
     result: List[Path] = []
 
-    def add_site(path_obj: Path):
-        # Disqualify plugin or internal subsystem paths
-        s_path = str(path_obj)
+    def is_disqualified(path_obj: Path) -> bool:
+        s_path = str(path_obj).lower()
         for sub in [
             "/blocks/", "/mod/", "/theme/", "/enrol/", "/auth/", "/filter/",
             "/report/", "/repository/", "/local/", "/dataformat/", "/portfolio/",
             "/webservice/", "/question/", "/availability/", "/grade/", "/message/",
-            "/media/", "/cache/", "/backup/", "/payment/"
+            "/media/", "/cache/", "/backup/", "/payment/", "plugins/", "aims-plugins",
+            "theme_", "theme-", "_backup_", "_old_", ".bak", "/temp/", "/tmp/"
         ]:
             if sub in s_path:
-                return
+                return True
+        return False
+
+    def add_site(path_obj: Path):
+        if is_disqualified(path_obj):
+            return
 
         # Support both traditional and Moodle 5.1+ public/ layouts
         cfg = path_obj / "config.php"
@@ -485,10 +490,13 @@ def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
             except Exception:
                 pass
 
-    # 1. From config.json
-    for s in config_sites:
-        if s:
-            add_site(Path(s))
+    # 1. From config.json (explicit user selection takes priority)
+    if config_sites:
+        for s in config_sites:
+            if s:
+                add_site(Path(s))
+        if result:
+            return result
 
     # 2. From Encrypted Vault
     if EncryptedVault is not None:
@@ -501,7 +509,7 @@ def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
         except Exception:
             pass
 
-    # 3. Standard filesystem locations
+    # 3. Standard filesystem locations (only if no explicit config_sites or vault sites)
     scan_roots = [Path("/var/www"), Path("/opt/moodle"), Path("/home")]
     for root in scan_roots:
         if root.exists():

@@ -170,8 +170,9 @@ _interactive_main_menu() {
         "Site: Remove a site" \
         "Site: Restore a site" \
         "Backup: Single site" \
-        "Backup: All sites" \
+        "Backup: All or Selected sites" \
         "Backup: Deploy Cloud Sync" \
+        "Backup: Select / Update Sites for Cloud Backup" \
         "Vault: Status & Security" \
         "Exit"
 
@@ -255,6 +256,10 @@ _interactive_main_menu() {
             cmd_backup_deploy
             ;;
 
+        *"Backup: Select"*)
+            cmd_backup_select_sites
+            ;;
+
         *"Vault: Status"*)
             python3 "${MOODLEKIT_LIB}/vault.py" status
             ;;
@@ -304,10 +309,11 @@ main() {
             ;;
         backup)
             case "${subcmd}" in
-                all)    cmd_backup_all "$@" ;;
-                deploy) cmd_backup_deploy "$@" ;;
-                "")     err "Usage: moodlekit backup <slug|all|deploy>"; exit 1 ;;
-                *)      cmd_backup_site "${subcmd}" "$@" ;;
+                all)          cmd_backup_all "$@" ;;
+                deploy)       cmd_backup_deploy "$@" ;;
+                select|sites) cmd_backup_select_sites "$@" ;;
+                "")           err "Usage: moodlekit backup <slug|all|deploy|select>"; exit 1 ;;
+                *)            cmd_backup_site "${subcmd}" "$@" ;;
             esac
             ;;
         restore)

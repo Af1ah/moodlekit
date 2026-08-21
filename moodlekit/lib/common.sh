@@ -316,8 +316,9 @@ is_moodle_directory() {
     local moodle_dir="$1"
     [[ ! -d "${moodle_dir}" ]] && return 1
     
-    # 1. STRICT EXCLUSION: Never treat plugin/subsystem subdirectories as Moodle roots
-    if [[ "${moodle_dir}" =~ /(blocks|mod|theme|enrol|auth|filter|report|repository|local|dataformat|portfolio|webservice|question|availability|grade|message|media|cache|backup|payment)/ ]]; then
+    # 1. STRICT EXCLUSION: Never treat plugin/theme/backup/temp subdirectories as Moodle roots
+    if [[ "${moodle_dir}" =~ /(blocks|mod|theme|enrol|auth|filter|report|repository|local|dataformat|portfolio|webservice|question|availability|grade|message|media|cache|backup|payment)/ || \
+          "${moodle_dir}" =~ (plugins/|aims-plugins|theme_|theme-|/theme$|_backup_|_old_|\.bak|/temp/|/tmp/) ]]; then
         return 1
     fi
     
@@ -699,7 +700,7 @@ site_exists() {
 # Moodle Site Discovery (Auto-detect standalone & unmanaged Moodle sites)
 # ---------------------------------------------------------------------------
 find_moodle_installations() {
-    local search_dirs=("/var/www" "/var/www/html" "/var/www/moodle" "/home" "/opt" "/var/www/vhosts")
+    local search_dirs=("/var/www" "/home" "/opt/moodle" "/opt/www" "/var/www/vhosts")
     local found_dirs=()
 
     for base in "${search_dirs[@]}"; do
@@ -721,7 +722,10 @@ find_moodle_installations() {
             -not -path "*/cache/*" \
             -not -path "*/localcache/*" \
             -not -path "*/sessions/*" \
-            -not -path "*/temp/*" 2>/dev/null)
+            -not -path "*/temp/*" \
+            -not -path "*plugins*" \
+            -not -path "*_backup_*" \
+            -not -path "*_old_*" 2>/dev/null)
 
         # 2. Discover sites by core lib/setup.php
         while IFS= read -r sfile; do
@@ -735,7 +739,10 @@ find_moodle_installations() {
             fi
         done < <(find "${base}" -maxdepth 4 -path "*/lib/setup.php" \
             -not -path "*/node_modules/*" \
-            -not -path "*/vendor/*" 2>/dev/null)
+            -not -path "*/vendor/*" \
+            -not -path "*plugins*" \
+            -not -path "*_backup_*" \
+            -not -path "*_old_*" 2>/dev/null)
     done
 
     # Print unique directories
@@ -943,7 +950,8 @@ configure_system_timezone() {
         ok "System & PHP timezone configured: ${target_tz}"
     fi
     
-    echo "${target_tz}"
+    export SYSTEM_TIMEZONE="${target_tz}"
+    return 0
 }
 
 # ---------------------------------------------------------------------------

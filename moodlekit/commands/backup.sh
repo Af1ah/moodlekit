@@ -148,22 +148,100 @@ MANIFEST
 # Backup all sites
 # ---------------------------------------------------------------------------
 cmd_backup_all() {
-    load_global_conf
-    local slugs
+    load_global_conf 0 || true
+    local slugs=()
     mapfile -t slugs < <(list_site_slugs)
+
+    while IFS= read -r sdir; do
+        local sname="$(basename "${sdir}")"
+        [[ -n "${sname}" ]] && slugs+=("${sname}")
+    done < <(find_moodle_installations 2>/dev/null)
+
+    mapfile -t slugs < <(printf '%s\n' "${slugs[@]}" | sort -u)
 
     if [[ ${#slugs[@]} -eq 0 ]]; then
         warn "No sites found to back up."
         return 0
     fi
 
-    section "MoodleKit — Backup All Sites (${#slugs[@]})"
-    for slug in "${slugs[@]}"; do
+    local selected=()
+    if is_interactive; then
+        select_many selected "Select sites to back up (Space to toggle, Enter to confirm):" "${slugs[@]}"
+    else
+        selected=("${slugs[@]}")
+    fi
+
+    if [[ ${#selected[@]} -eq 0 ]]; then
+        selected=("${slugs[@]}")
+    fi
+
+    section "MoodleKit — Backup Sites (${#selected[@]})"
+    for slug in "${selected[@]}"; do
         echo ""
         info "Backing up: ${slug}"
         OPT_DB_ONLY=0 cmd_backup_site "${slug}"
     done
-    ok "All sites backed up"
+    ok "All selected sites backed up"
+}
+
+# ---------------------------------------------------------------------------
+# Select & Update Sites for Automated Cloud Backup
+# ---------------------------------------------------------------------------
+cmd_backup_select_sites() {
+    require_root
+    init_logging "backup-select-sites"
+    section "MoodleKit — Select Sites for Cloud Backup"
+
+    local OPT_DIR="${MOODLEKIT_OPT_DIR}/backup"
+    mkdir -p "${OPT_DIR}"
+
+    local -a candidate_sites=()
+    while IFS= read -r sdir; do
+        [[ -n "${sdir}" ]] && candidate_sites+=("${sdir}")
+    done < <(find_moodle_installations 2>/dev/null)
+
+    if [[ ${#candidate_sites[@]} -eq 0 ]]; then
+        warn "No Moodle sites found on system."
+        return 0
+    fi
+
+    local -a selected_sites=()
+    info "Select which Moodle sites to include in automated cloud backups:"
+    select_many selected_sites "Choose sites to back up (Space to toggle, Enter to confirm):" "${candidate_sites[@]}"
+
+    if [[ ${#selected_sites[@]} -eq 0 ]]; then
+        warn "No sites selected. Keeping previous configuration."
+        return 0
+    fi
+
+    local sites_json='['
+    local first=1
+    for s in "${selected_sites[@]}"; do
+        [[ -z "${s}" ]] && continue
+        [[ "${first}" -eq 0 ]] && sites_json+=','
+        sites_json+="\"${s}\""
+        first=0
+    done
+    sites_json+=']'
+
+    if [[ -f "${OPT_DIR}/config.json" ]]; then
+        python3 -c "
+import json
+try:
+    with open('${OPT_DIR}/config.json', 'r') as f:
+        data = json.load(f)
+    data['moodle_sites'] = ${sites_json}
+    with open('${OPT_DIR}/config.json', 'w') as f:
+        json.dump(data, f, indent=2)
+except Exception:
+    pass
+" 2>/dev/null || true
+    fi
+
+    ok "Automated backup site list updated successfully (${#selected_sites[@]} sites):"
+    for s in "${selected_sites[@]}"; do
+        echo -e "  ${C_BOLD_GREEN}•${C_RESET} ${s}"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -183,8 +261,9 @@ cmd_backup_deploy() {
     # Step 1 — Timezone & Schedule Selection
     # ─────────────────────────────────────────────────────────────────────────
     step 1 6 "Timezone & schedule configuration"
+    configure_system_timezone 0
     local server_tz
-    server_tz="$(configure_system_timezone 0)"
+    server_tz="$(get_system_timezone)"
     
     local backup_time="02:00"
     if is_interactive; then
@@ -228,21 +307,53 @@ cmd_backup_deploy() {
     ok "Backup engine deployed to ${OPT_DIR}/moodle_backup.py"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Step 3 — Create config.json matching exact reference architecture
+    # Step 3 — Select Sites & Configure Engine
     # ─────────────────────────────────────────────────────────────────────────
-    step 3 6 "Create configuration & credentials"
-    if [[ ! -f "${OPT_DIR}/config.json" ]]; then
-        # Build moodle_sites list from vault & scanned sites
-        local sites_json='['
-        local first=1
-        while IFS= read -r sdir; do
-            [[ -z "${sdir}" ]] && continue
-            [[ "${first}" -eq 0 ]] && sites_json+=','
-            sites_json+="\"${sdir}\""
-            first=0
-        done < <(find_moodle_installations 2>/dev/null)
-        sites_json+=']'
+    step 3 6 "Select sites & configure backup"
+    local -a candidate_sites=()
+    while IFS= read -r sdir; do
+        [[ -n "${sdir}" ]] && candidate_sites+=("${sdir}")
+    done < <(find_moodle_installations 2>/dev/null)
 
+    local -a selected_sites=()
+    if [[ ${#candidate_sites[@]} -gt 0 ]]; then
+        if is_interactive; then
+            echo ""
+            info "Select which Moodle sites to include in automated cloud backups:"
+            select_many selected_sites "Choose sites to back up (Space to toggle, Enter to confirm):" "${candidate_sites[@]}"
+        else
+            selected_sites=("${candidate_sites[@]}")
+        fi
+    fi
+
+    if [[ ${#selected_sites[@]} -eq 0 ]]; then
+        selected_sites=("${candidate_sites[@]}")
+    fi
+
+    local sites_json='['
+    local first=1
+    for s in "${selected_sites[@]}"; do
+        [[ -z "${s}" ]] && continue
+        [[ "${first}" -eq 0 ]] && sites_json+=','
+        sites_json+="\"${s}\""
+        first=0
+    done
+    sites_json+=']'
+
+    if [[ -f "${OPT_DIR}/config.json" ]]; then
+        python3 -c "
+import json
+try:
+    with open('${OPT_DIR}/config.json', 'r') as f:
+        data = json.load(f)
+    data['moodle_sites'] = ${sites_json}
+    with open('${OPT_DIR}/config.json', 'w') as f:
+        json.dump(data, f, indent=2)
+except Exception:
+    pass
+" 2>/dev/null || true
+        ok "config.json updated with ${#selected_sites[@]} selected sites"
+    else
         cat > "${OPT_DIR}/config.json" << CONFIGJSON
 {
   "server_name": "$(hostname -f)",
@@ -271,9 +382,7 @@ cmd_backup_deploy() {
 }
 CONFIGJSON
         chmod 600 "${OPT_DIR}/config.json"
-        ok "config.json created (/opt/db_backups -> gdrive:MoodleBackup)"
-    else
-        ok "config.json already exists — preserving existing settings"
+        ok "config.json created (/opt/db_backups -> gdrive:MoodleBackup) with ${#selected_sites[@]} sites"
     fi
 
     # Telegram Notifications Setup

@@ -79,7 +79,7 @@ cmd_site_remove() {
     # Step 2 — Remove cron
     # ─────────────────────────────────────────────────────────────────────────
     step 2 9 "Remove cron job"
-    rm -f "/etc/cron.d/moodlekit-${SLUG}"
+    rm -f "/etc/cron.d/moodle-${SLUG}" "/etc/cron.d/moodlekit-${SLUG}" "/etc/cron.d/moodle_${SLUG}" "/etc/cron.d/${SLUG}"
     ok "Cron job removed"
 
     # ─────────────────────────────────────────────────────────────────────────

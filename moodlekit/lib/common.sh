@@ -480,6 +480,56 @@ detect_fpm_socket() {
     echo "/run/php/php${php_ver}-fpm-${slug}.sock"
 }
 
+# Dynamically detects whether a cron job is configured for a Moodle site
+detect_moodle_cron() {
+    local slug="$1"
+    local moodle_dir="${2:-}"
+    [[ -z "${moodle_dir}" ]] && moodle_dir="/var/www/moodle/${slug}"
+
+    # 1. Check direct cron files in /etc/cron.d/
+    local candidate
+    for candidate in \
+        "/etc/cron.d/moodle-${slug}" \
+        "/etc/cron.d/moodlekit-${slug}" \
+        "/etc/cron.d/moodle_${slug}" \
+        "/etc/cron.d/${slug}"; do
+        if [[ -f "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    # 2. Check all files in /etc/cron.d/ for reference to this site's cron.php or slug
+    if [[ -d "/etc/cron.d" ]]; then
+        local matched_file
+        matched_file="$(grep -rnE "(${slug}/admin/cli/cron\.php|moodle-${slug})" /etc/cron.d/ 2>/dev/null | head -1 | cut -d: -f1 || true)"
+        if [[ -n "${matched_file}" && -f "${matched_file}" ]]; then
+            echo "${matched_file}"
+            return 0
+        fi
+    fi
+
+    # 3. Check user crontabs (www-data or root)
+    if crontab -u www-data -l 2>/dev/null | grep -qE "(${slug}/admin/cli/cron\.php|moodle-${slug}|moodlekit-${slug})"; then
+        echo "crontab:www-data"
+        return 0
+    fi
+    if crontab -u root -l 2>/dev/null | grep -qE "(${slug}/admin/cli/cron\.php|moodle-${slug}|moodlekit-${slug})"; then
+        echo "crontab:root"
+        return 0
+    fi
+
+    # 4. Check systemd timers
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-active --quiet "moodle-${slug}.timer" 2>/dev/null || systemctl is-active --quiet "moodlekit-${slug}.timer" 2>/dev/null; then
+            echo "systemd:timer"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Global & Site config helpers (Backed by Encrypted Binary Vault)
 # ---------------------------------------------------------------------------

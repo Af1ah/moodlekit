@@ -83,7 +83,7 @@ server {
     # e.g. /styles.php/boost/1234567890/all
     location ~ \.php(/|$) {
         fastcgi_split_path_info  ^(.+\.php)(/.*)$;
-        fastcgi_pass             unix:/run/php/php{{PHP_VERSION}}-fpm-moodle_{{SLUG}}.sock;
+        fastcgi_pass             unix:{{FPM_SOCK}};
         include                  fastcgi_params;
 
         # Essential for Moodle 5.x router — use realpath_root not document_root
@@ -106,7 +106,7 @@ server {
         limit_req_status 429;
         # Still needs PHP handler
         fastcgi_split_path_info  ^(.+\.php)(/.*)$;
-        fastcgi_pass             unix:/run/php/php{{PHP_VERSION}}-fpm-moodle_{{SLUG}}.sock;
+        fastcgi_pass             unix:{{FPM_SOCK}};
         include                  fastcgi_params;
         fastcgi_param SCRIPT_FILENAME  $realpath_root$fastcgi_script_name;
         fastcgi_param PATH_INFO        $fastcgi_path_info;

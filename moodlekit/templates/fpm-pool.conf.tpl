@@ -10,7 +10,7 @@ user  = www-data
 group = www-data
 
 ; ── Unix socket (no TCP overhead) ────────────────────────────────────────────
-listen = /run/php/php{{PHP_VERSION}}-fpm-moodle_{{SLUG}}.sock
+listen = {{FPM_SOCK}}
 listen.owner = www-data
 listen.group = www-data
 listen.mode  = 0660

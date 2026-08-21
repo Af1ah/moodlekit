@@ -75,7 +75,7 @@ server {
     # ── PHP handler with PATH_INFO ─────────────────────────────────────────────
     location ~ \.php(/|$) {
         fastcgi_split_path_info  ^(.+\.php)(/.*)$;
-        fastcgi_pass             unix:/run/php/php{{PHP_VERSION}}-fpm-moodle_{{SLUG}}.sock;
+        fastcgi_pass             unix:{{FPM_SOCK}};
         include                  fastcgi_params;
 
         fastcgi_param SCRIPT_FILENAME  $realpath_root$fastcgi_script_name;
@@ -94,7 +94,7 @@ server {
         limit_req zone=moodle_login burst=3 nodelay;
         limit_req_status 429;
         fastcgi_split_path_info  ^(.+\.php)(/.*)$;
-        fastcgi_pass             unix:/run/php/php{{PHP_VERSION}}-fpm-moodle_{{SLUG}}.sock;
+        fastcgi_pass             unix:{{FPM_SOCK}};
         include                  fastcgi_params;
         fastcgi_param SCRIPT_FILENAME  $realpath_root$fastcgi_script_name;
         fastcgi_param PATH_INFO        $fastcgi_path_info;

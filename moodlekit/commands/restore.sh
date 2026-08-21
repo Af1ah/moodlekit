@@ -173,9 +173,15 @@ _restore_inplace() {
     local nginx_tpl="${MOODLEKIT_TPL}/nginx-moodle4.conf.tpl"
     [[ "${IS_MOODLE5:-0}" -eq 1 ]] && nginx_tpl="${MOODLEKIT_TPL}/nginx-moodle5.conf.tpl"
     
+    local active_php="${PHP_VERSION:-}"
+    [[ -z "${active_php}" ]] && active_php="$(get_installed_php_version)"
+    local fpm_sock
+    fpm_sock="$(detect_fpm_socket "${slug}" "${active_php}")"
+    
     render_template_to_file "${nginx_tpl}" "${NGINX_CONF}" \
         "DOMAIN=${DOMAIN}" "MOODLE_DIR=${MOODLE_DIR}" \
-        "MOODLEDATA_DIR=${MOODLEDATA_DIR}" "PHP_VERSION=${PHP_VERSION}" "SLUG=${slug}"
+        "MOODLEDATA_DIR=${MOODLEDATA_DIR}" "PHP_VERSION=${active_php}" \
+        "FPM_SOCK=${fpm_sock}" "SLUG=${slug}"
     reload_nginx
     ok "Nginx configuration updated"
 
@@ -308,8 +314,9 @@ _do_fresh_provisioning() {
     local PHP_VERSION="${bk_php_version:-${PHP_VERSION}}"
 
     local NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
-    local FPM_SOCK="/run/php/php${PHP_VERSION}-fpm-moodle_${slug}.sock"
-    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
+    local FPM_SOCK
+    FPM_SOCK="$(detect_fpm_socket "${slug}" "${PHP_VERSION}")"
+    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/${slug}.conf"
     local ADMIN_CLI="${MOODLE_DIR}/admin/cli"
 
     # ── Resume detection ───────────────────────────────────────────────────
@@ -581,7 +588,7 @@ _do_fresh_provisioning() {
     calculate_tuning "balanced" "${num_sites}" "${bk_db_type}"
 
     render_template_to_file "${MOODLEKIT_TPL}/fpm-pool.conf.tpl" "${FPM_POOL_CONF}" \
-        "SLUG=${slug}" "PHP_VERSION=${PHP_VERSION}" \
+        "SLUG=${slug}" "PHP_VERSION=${PHP_VERSION}" "FPM_SOCK=${FPM_SOCK}" \
         "MAX_CHILDREN=${TUNE_FPM_MAX_CHILDREN}" "START_SERVERS=${TUNE_FPM_START_SERVERS}" \
         "MIN_SPARE=${TUNE_FPM_MIN_SPARE}" "MAX_SPARE=${TUNE_FPM_MAX_SPARE}" \
         "MOODLE_DIR=${MOODLE_DIR}" "MOODLEDATA_DIR=${MOODLEDATA_DIR}" \
@@ -594,7 +601,8 @@ _do_fresh_provisioning() {
 
     render_template_to_file "${nginx_tpl}" "${NGINX_CONF}" \
         "DOMAIN=${DOMAIN}" "MOODLE_DIR=${MOODLE_DIR}" \
-        "MOODLEDATA_DIR=${MOODLEDATA_DIR}" "PHP_VERSION=${PHP_VERSION}" "SLUG=${slug}"
+        "MOODLEDATA_DIR=${MOODLEDATA_DIR}" "PHP_VERSION=${PHP_VERSION}" \
+        "FPM_SOCK=${FPM_SOCK}" "SLUG=${slug}"
 
     # For initial HTTP-only (before certbot), strip TLS directives temporarily
     cat > "${NGINX_CONF}.http-only" << HTTPONLY

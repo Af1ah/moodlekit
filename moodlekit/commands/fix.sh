@@ -168,9 +168,11 @@ _doctor_site() {
     fi
     
     # 5. Check PHP-FPM
-    local fpm_sock="${FPM_SOCK:-/run/php/php${target_php}-fpm-moodle_${slug}.sock}"
-    local fpm_pool="${FPM_POOL_CONF:-/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf}"
-    if [[ ! -f "${fpm_pool}" || ! -S "${fpm_sock}" ]]; then
+    local fpm_sock
+    fpm_sock="$(detect_fpm_socket "${slug}" "${target_php}")"
+    local fpm_pool="${FPM_POOL_CONF:-/etc/php/${target_php}/fpm/pool.d/${slug}.conf}"
+    [[ ! -f "${fpm_pool}" ]] && fpm_pool="/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf"
+    if [[ ! -f "${fpm_pool}" && ! -S "${fpm_sock}" ]]; then
         audit_fpm_ok=0
     fi
     
@@ -409,13 +411,18 @@ _fix_php() {
 _fix_fpm() {
     local slug="$1"
     step 1 1 "Rebuilding & Reloading PHP-FPM Pool"
-    local target_php="${PHP_VERSION:-8.3}"
-    local pool_conf="${FPM_POOL_CONF:-/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf}"
+    local target_php="${PHP_VERSION:-}"
+    [[ -z "${target_php}" ]] && target_php="$(get_installed_php_version)"
+    local fpm_sock
+    fpm_sock="$(detect_fpm_socket "${slug}" "${target_php}")"
+    local pool_conf="${FPM_POOL_CONF:-/etc/php/${target_php}/fpm/pool.d/${slug}.conf}"
+    [[ ! -f "${pool_conf}" && -f "/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf" ]] && pool_conf="/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf"
     
     calculate_tuning "balanced" 1 "${DB_TYPE:-mariadb}"
     render_template_to_file "${MOODLEKIT_TPL}/fpm-pool.conf.tpl" "${pool_conf}" \
         "SLUG=${slug}" \
         "PHP_VERSION=${target_php}" \
+        "FPM_SOCK=${fpm_sock}" \
         "MAX_CHILDREN=${TUNE_FPM_MAX_CHILDREN:-5}" \
         "START_SERVERS=${TUNE_FPM_START_SERVERS:-2}" \
         "MIN_SPARE=${TUNE_FPM_MIN_SPARE:-1}" \
@@ -426,13 +433,16 @@ _fix_fpm() {
         "TIMESTAMP=$(date)"
     
     reload_fpm "${target_php}"
-    ok "PHP-FPM pool active (${pool_conf})"
+    ok "PHP-FPM pool active (${pool_conf}, socket: ${fpm_sock})"
 }
 
 _fix_nginx() {
     local slug="$1"
     step 1 1 "Verifying Nginx Virtual Host & Reloading"
-    local target_php="${PHP_VERSION:-8.3}"
+    local target_php="${PHP_VERSION:-}"
+    [[ -z "${target_php}" ]] && target_php="$(get_installed_php_version)"
+    local fpm_sock
+    fpm_sock="$(detect_fpm_socket "${slug}" "${target_php}")"
     local nginx_conf="${NGINX_CONF:-/etc/nginx/sites-available/moodle-${slug}}"
     local nginx_link="/etc/nginx/sites-enabled/moodle-${slug}"
     
@@ -446,6 +456,7 @@ _fix_nginx() {
             "MOODLE_DIR=${MOODLE_DIR}" \
             "MOODLEDATA_DIR=${MOODLEDATA_DIR}" \
             "PHP_VERSION=${target_php}" \
+            "FPM_SOCK=${fpm_sock}" \
             "SLUG=${slug}"
     fi
     

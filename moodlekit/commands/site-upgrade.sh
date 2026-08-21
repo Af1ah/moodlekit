@@ -207,6 +207,11 @@ cmd_site_upgrade() {
     
     # ── Step 5: Nginx Configuration ──────────────────────────────────────────
     step 5 7 "Verifying Nginx Virtual Host"
+    local active_php="${PHP_VERSION:-}"
+    [[ -z "${active_php}" ]] && active_php="$(get_installed_php_version)"
+    local fpm_sock
+    fpm_sock="$(detect_fpm_socket "${SLUG}" "${active_php}")"
+    
     local nginx_conf="${NGINX_CONF:-/etc/nginx/sites-available/moodle-${SLUG}}"
     if [[ -f "${nginx_conf}" ]]; then
         local nginx_tpl="${MOODLEKIT_TPL}/nginx-moodle4.conf.tpl"
@@ -216,10 +221,11 @@ cmd_site_upgrade() {
             "DOMAIN=${DOMAIN:-$SLUG.local}" \
             "MOODLE_DIR=${MOODLE_DIR}" \
             "MOODLEDATA_DIR=${MOODLEDATA_DIR:-/var/moodledata/$SLUG}" \
-            "PHP_VERSION=${PHP_VERSION:-8.3}" \
+            "PHP_VERSION=${active_php}" \
+            "FPM_SOCK=${fpm_sock}" \
             "SLUG=${SLUG}"
         reload_nginx
-        ok "Nginx virtual host configured for Moodle ${TARGET_VER}"
+        ok "Nginx virtual host configured for Moodle ${TARGET_VER} (Socket: ${fpm_sock})"
     fi
     
     # ── Step 6: Moodle CLI Database Upgrade & Cache Purge ────────────────────
@@ -229,31 +235,31 @@ cmd_site_upgrade() {
     
     # Purge caches first
     if [[ -f "${new_admin_cli}/purge_caches.php" ]]; then
-        sudo -u www-data "/usr/bin/php${PHP_VERSION:-8.3}" "${new_admin_cli}/purge_caches.php" 2>/dev/null || true
+        sudo -u www-data "/usr/bin/php${active_php}" "${new_admin_cli}/purge_caches.php" 2>/dev/null || true
     fi
     
     if [[ -f "${new_admin_cli}/upgrade.php" ]]; then
         info "Running Moodle schema upgrade (admin/cli/upgrade.php)..."
-        sudo -u www-data "/usr/bin/php${PHP_VERSION:-8.3}" "${new_admin_cli}/upgrade.php" --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
+        sudo -u www-data "/usr/bin/php${active_php}" "${new_admin_cli}/upgrade.php" --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
         ok "Moodle database schema upgraded"
     else
         warn "admin/cli/upgrade.php not found; skipped database upgrade"
     fi
     
     if [[ -f "${new_admin_cli}/purge_caches.php" ]]; then
-        sudo -u www-data "/usr/bin/php${PHP_VERSION:-8.3}" "${new_admin_cli}/purge_caches.php" 2>/dev/null || true
+        sudo -u www-data "/usr/bin/php${active_php}" "${new_admin_cli}/purge_caches.php" 2>/dev/null || true
         ok "Caches purged"
     fi
     
     # ── Step 7: Disable Maintenance Mode & Update Vault ──────────────────────
     step 7 7 "Restoring Live Service & Updating Vault State"
     if [[ -f "${new_admin_cli}/maintenance.php" ]]; then
-        sudo -u www-data "/usr/bin/php${PHP_VERSION:-8.3}" "${new_admin_cli}/maintenance.php" --disable 2>/dev/null || true
+        sudo -u www-data "/usr/bin/php${active_php}" "${new_admin_cli}/maintenance.php" --disable 2>/dev/null || true
         ok "Maintenance mode disabled"
     fi
     
     if [[ -f "${new_admin_cli}/cron.php" ]]; then
-        sudo -u www-data "/usr/bin/php${PHP_VERSION:-8.3}" "${new_admin_cli}/cron.php" 2>&1 | tee -a "${_LOG_FILE}" >/dev/null || true
+        sudo -u www-data "/usr/bin/php${active_php}" "${new_admin_cli}/cron.php" 2>&1 | tee -a "${_LOG_FILE}" >/dev/null || true
     fi
     
     # Determine new version string

@@ -122,9 +122,10 @@ cmd_site_create() {
     # Config.php location (always in root, not public/)
     local CONFIG_PHP="${MOODLE_DIR}/config.php"
 
-    # FPM socket
-    local FPM_SOCK="/run/php/php${PHP_VERSION}-fpm-moodle_${SLUG}.sock"
-    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${SLUG}.conf"
+    # FPM socket & pool
+    local FPM_SOCK
+    FPM_SOCK="$(detect_fpm_socket "${SLUG}" "${PHP_VERSION}")"
+    local FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/${SLUG}.conf"
     local NGINX_CONF="/etc/nginx/sites-available/moodle-${SLUG}"
     local NGINX_ENABLED="/etc/nginx/sites-enabled/moodle-${SLUG}"
 
@@ -334,6 +335,7 @@ cmd_site_create() {
     render_template_to_file "${MOODLEKIT_TPL}/fpm-pool.conf.tpl" "${FPM_POOL_CONF}" \
         "SLUG=${SLUG}" \
         "PHP_VERSION=${PHP_VERSION}" \
+        "FPM_SOCK=${FPM_SOCK}" \
         "MAX_CHILDREN=${TUNE_FPM_MAX_CHILDREN}" \
         "START_SERVERS=${TUNE_FPM_START_SERVERS}" \
         "MIN_SPARE=${TUNE_FPM_MIN_SPARE}" \
@@ -365,6 +367,7 @@ cmd_site_create() {
         "MOODLE_DIR=${MOODLE_DIR}" \
         "MOODLEDATA_DIR=${MOODLEDATA_DIR}" \
         "PHP_VERSION=${PHP_VERSION}" \
+        "FPM_SOCK=${FPM_SOCK}" \
         "SLUG=${SLUG}"
 
     # For initial HTTP-only (before certbot), strip TLS directives temporarily

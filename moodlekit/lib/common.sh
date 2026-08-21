@@ -414,6 +414,72 @@ moodle_admin_cli() {
     find_moodle_admin_cli "$1"
 }
 
+# Returns active/installed PHP version on the host (e.g. 8.4, 8.3)
+get_installed_php_version() {
+    if command -v php &>/dev/null; then
+        local v
+        v="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+        if [[ -n "${v}" ]]; then
+            echo "${v}"
+            return 0
+        fi
+    fi
+    local latest_dir
+    latest_dir="$(find /etc/php -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | sort -V | tail -1 || true)"
+    if [[ -n "${latest_dir}" ]]; then
+        echo "${latest_dir}"
+        return 0
+    fi
+    echo "8.4"
+}
+
+# Dynamically detects the exact PHP-FPM socket path for a site on the filesystem
+detect_fpm_socket() {
+    local slug="$1"
+    local php_ver="${2:-}"
+    [[ -z "${php_ver}" ]] && php_ver="$(get_installed_php_version)"
+
+    # 1. Check for active socket in /run/php matching this site
+    local candidate_sock
+    for candidate_sock in \
+        "/run/php/php${php_ver}-fpm-${slug}.sock" \
+        "/run/php/php${php_ver}-fpm-moodle_${slug}.sock" \
+        "/run/php/php*-fpm-${slug}.sock" \
+        "/run/php/php*-fpm-moodle_${slug}.sock"; do
+        for s in ${candidate_sock}; do
+            if [[ -S "${s}" || -e "${s}" ]]; then
+                echo "${s}"
+                return 0
+            fi
+        done
+    done
+
+    # 2. Check pool configuration files in /etc/php/*/fpm/pool.d/
+    local pool_conf
+    for pool_conf in \
+        "/etc/php/${php_ver}/fpm/pool.d/${slug}.conf" \
+        "/etc/php/${php_ver}/fpm/pool.d/moodle_${slug}.conf" \
+        /etc/php/*/fpm/pool.d/*"${slug}"*.conf; do
+        if [[ -f "${pool_conf}" ]]; then
+            local listen_val
+            listen_val="$(grep -E '^\s*listen\s*=' "${pool_conf}" 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d ' ' || true)"
+            if [[ -n "${listen_val}" ]]; then
+                echo "${listen_val}"
+                return 0
+            fi
+        fi
+    done
+
+    # 3. Check general running pool socket
+    if [[ -S "/run/php/php${php_ver}-fpm.sock" ]]; then
+        echo "/run/php/php${php_ver}-fpm.sock"
+        return 0
+    fi
+
+    # 4. Standard clean default socket naming for dedicated site pool
+    echo "/run/php/php${php_ver}-fpm-${slug}.sock"
+}
+
 # ---------------------------------------------------------------------------
 # Global & Site config helpers (Backed by Encrypted Binary Vault)
 # ---------------------------------------------------------------------------

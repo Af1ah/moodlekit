@@ -2,9 +2,21 @@
 # =============================================================================
 # MoodleKit — Main CLI Entry Point
 # =============================================================================
+# Moodle Fixer, Manager, Provisioner & Cloud Backup Toolkit
+# Backed by AES-256 Encrypted Binary Vault Storage.
+# Supports both Standalone Moodle Sites and Multi-Tenant Clusters.
+# =============================================================================
 
-export MOODLEKIT_VERSION="1.0.0"
-export MOODLEKIT_ROOT="/opt/moodlekit"
+export MOODLEKIT_VERSION="2.0.0"
+
+# Determine script root dynamically
+_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "${_SRC_DIR}/lib" ]]; then
+    export MOODLEKIT_ROOT="${_SRC_DIR}"
+else
+    export MOODLEKIT_ROOT="/opt/moodlekit"
+fi
+
 export MOODLEKIT_LIB="${MOODLEKIT_ROOT}/lib"
 export MOODLEKIT_CMD="${MOODLEKIT_ROOT}/commands"
 export MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
@@ -17,17 +29,8 @@ export MOODLEKIT_BACKUP_DIR="/var/backups/moodlekit"
 # Options (parsed from global flags)
 export MOODLEKIT_YES=0
 
-# ---------------------------------------------------------------------------
-# Load libraries
-# ---------------------------------------------------------------------------
-if [[ ! -d "${MOODLEKIT_LIB}" ]]; then
-    # Dev mode fallback
-    MOODLEKIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    MOODLEKIT_LIB="${MOODLEKIT_ROOT}/lib"
-    MOODLEKIT_CMD="${MOODLEKIT_ROOT}/commands"
-    MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
-fi
-
+# shellcheck source=lib/vault.sh
+source "${MOODLEKIT_LIB}/vault.sh"
 # shellcheck source=lib/common.sh
 source "${MOODLEKIT_LIB}/common.sh"
 # shellcheck source=lib/detect.sh
@@ -48,6 +51,9 @@ for cmd_file in "${MOODLEKIT_CMD}"/*.sh; do
     # shellcheck source=/dev/null
     [[ -f "${cmd_file}" ]] && source "${cmd_file}"
 done
+
+# Initialize vault and auto-migrate legacy data
+vault_init
 
 # ---------------------------------------------------------------------------
 # Global flag parser
@@ -83,7 +89,7 @@ parse_global_flags() {
 # ---------------------------------------------------------------------------
 print_help() {
     cat << EOF
-MoodleKit v${MOODLEKIT_VERSION} — Moodle server and tenant management
+MoodleKit v${MOODLEKIT_VERSION} — Moodle Fixer, Manager & Cloud Backup Toolkit
 
 Usage: moodlekit [GLOBAL_FLAGS] <COMMAND> [ARGS...]
 
@@ -92,22 +98,33 @@ Global Flags:
   -v, --version      Show version
   -h, --help         Show this help
 
-Commands:
-  bootstrap          Provision the host server (PHP, Nginx, DB, Redis)
+Diagnostic & Repair (Moodle Doctor):
+  doctor, fix [target]   Diagnose and auto-fix permissions, dataroot, DB, PHP, FPM, Nginx, cron
+  adopt [path] [slug]    Adopt an existing standalone Moodle directory into MoodleKit management
+
+Host & Provisioning:
+  bootstrap          Provision the host server (PHP, Nginx, DB, Redis, Certbot, UFW)
   tune [mode]        Re-tune server performance (balanced, conservative, aggressive)
-  status             Show server health and hardware status
+  status             Show server health, stack status, and all detected Moodle sites
 
-Site Commands:
-  site create <slug> Create a new Moodle tenant
-  site remove <slug> Delete a tenant permanently
-  site list          List all managed tenants
-  site upgrade <slug> Upgrade a Moodle tenant to a newer version
+Site Management (Standalone & Multi-Tenant):
+  site create <slug> Create a new Moodle site
+  site adopt <path>  Adopt an existing Moodle site from disk
+  site remove <slug> Delete a site and/or deregister from vault
+  site list          List all managed and unmanaged Moodle sites
+  site upgrade <slug> Upgrade a Moodle site to a newer version
 
-Backup & Restore:
-  backup <slug>      Create a local backup of a specific tenant
-  backup all         Create a local backup for all tenants
-  backup deploy      Deploy the Python cloud backup script + systemd timer
+Backup & Recovery:
+  backup <slug>      Create a local backup (DB + moodledata + config + manifest)
+  backup all         Create a local backup for all registered sites
+  backup deploy      Deploy the Python cloud backup script + systemd timer (GDrive/Telegram)
   restore <slug> <backup_path>  Restore a site (in-place or fresh)
+  restore manual     Interactive recovery from raw SQL and dataroot
+
+Security & Vault:
+  vault status       Show encrypted binary vault status and key location
+  vault dump         Display decrypted vault JSON data (root only)
+  vault migrate      Migrate legacy .conf files into encrypted vault
 EOF
 }
 
@@ -115,7 +132,6 @@ EOF
 # Interactive Main Menu
 # ---------------------------------------------------------------------------
 
-# Helper: pick an existing site slug with arrow keys, or fallback to text input
 _pick_site_slug() {
     local -n _slug_result="$1"
     local prompt="$2"
@@ -129,7 +145,7 @@ _pick_site_slug() {
     fi
 
     if [[ ${#slugs[@]} -eq 0 ]]; then
-        warn "No managed sites found."
+        warn "No managed sites found in encrypted vault."
         _slug_result=""
         return 1
     fi
@@ -142,21 +158,53 @@ _interactive_main_menu() {
     section "MoodleKit — Main Menu"
     local choice=""
     select_one choice "Select an action:" \
-        "Site: Create a new tenant" \
-        "Site: List all tenants" \
-        "Site: Upgrade a tenant" \
-        "Site: Remove a tenant" \
-        "Site: Restore a tenant" \
+        "Server: Bootstrap & Provision Host (Fresh Install PHP/Nginx/DB/Redis)" \
+        "Server: Status & Health Overview" \
+        "Server: Tune Performance (RAM-aware PHP/DB/Redis tuning)" \
+        "Doctor: Diagnose & Fix Moodle site" \
+        "Doctor: Fix entire server stack" \
+        "Site: Create a new site (Moodle 5.2 or 4.5)" \
+        "Site: Adopt existing standalone Moodle" \
+        "Site: List all sites" \
+        "Site: Upgrade a site" \
+        "Site: Remove a site" \
+        "Site: Restore a site" \
         "Backup: Single site" \
         "Backup: All sites" \
         "Backup: Deploy Cloud Sync" \
-        "Server: Status" \
-        "Server: Tune Performance" \
+        "Vault: Status & Security" \
         "Exit"
 
     case "${choice}" in
+        *"Server: Bootstrap"*)
+            cmd_bootstrap
+            ;;
+
+        *"Server: Status"*)
+            cmd_status
+            ;;
+
+        *"Server: Tune"*)
+            local tune_mode=""
+            select_one tune_mode "Select tuning mode:" \
+                "balanced" "conservative" "aggressive"
+            cmd_tune "${tune_mode}"
+            ;;
+
+        *"Doctor: Diagnose & Fix Moodle site"*)
+            cmd_fix
+            ;;
+
+        *"Doctor: Fix entire server stack"*)
+            _doctor_server_stack
+            ;;
+
         *"Site: Create"*)
             cmd_site_create
+            ;;
+
+        *"Site: Adopt"*)
+            cmd_adopt
             ;;
 
         *"Site: List"*)
@@ -179,7 +227,7 @@ _interactive_main_menu() {
             local method_choice=""
             select_one method_choice "Select restore method:" \
                 "Fresh restore from backup directory" \
-                "Manual / Legacy recovery (raw SQL + files)" \
+                "Manual / Legacy recovery (raw SQL + files)"
 
             if [[ "${method_choice}" == *"Manual"* ]]; then
                 cmd_restore "manual" ""
@@ -207,15 +255,8 @@ _interactive_main_menu() {
             cmd_backup_deploy
             ;;
 
-        *"Server: Status"*)
-            cmd_status
-            ;;
-
-        *"Server: Tune"*)
-            local tune_mode=""
-            select_one tune_mode "Select tuning mode:" \
-                "balanced" "conservative" "aggressive"
-            cmd_tune "${tune_mode}"
+        *"Vault: Status"*)
+            python3 "${MOODLEKIT_LIB}/vault.py" status
             ;;
 
         *"Exit"*)
@@ -236,6 +277,12 @@ main() {
     shift 2 2>/dev/null || shift 1 2>/dev/null || true
 
     case "${cmd}" in
+        doctor|fix)
+            cmd_fix "${subcmd}" "$@"
+            ;;
+        adopt)
+            cmd_adopt "${subcmd}" "$@"
+            ;;
         bootstrap)
             cmd_bootstrap "$@"
             ;;
@@ -248,6 +295,7 @@ main() {
         site)
             case "${subcmd}" in
                 create)  cmd_site_create "$@" ;;
+                adopt)   cmd_adopt "$@" ;;
                 remove)  cmd_site_remove "$@" ;;
                 list)    cmd_site_list "$@" ;;
                 upgrade) cmd_site_upgrade "$@" ;;
@@ -263,8 +311,15 @@ main() {
             esac
             ;;
         restore)
-            # subcmd is slug here
             cmd_restore "${subcmd}" "$@"
+            ;;
+        vault)
+            case "${subcmd}" in
+                status)  python3 "${MOODLEKIT_LIB}/vault.py" status ;;
+                dump)    python3 "${MOODLEKIT_LIB}/vault.py" dump ;;
+                migrate) python3 "${MOODLEKIT_LIB}/vault.py" migrate ;;
+                *)       err "Usage: moodlekit vault <status|dump|migrate>"; exit 1 ;;
+            esac
             ;;
         *)
             if [[ -n "${cmd}" ]]; then
@@ -274,11 +329,7 @@ main() {
                 exit 1
             fi
             
-            # If no command provided, go interactive
-            if [[ ! -f "${MOODLEKIT_STATE_DIR}/.bootstrap_complete" ]]; then
-                warn "Server not bootstrapped yet. Some features may not work."
-                echo ""
-            fi
+            # Interactive mode
             _interactive_main_menu
             ;;
     esac

@@ -145,11 +145,27 @@ cmd_site_upgrade() {
     # Run cron once
     sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${new_admin_cli}/cron.php" 2>&1 | tee -a "${_LOG_FILE}" > /dev/null
     
-    # Update config
-    sed -i "s/^MOODLE_VERSION=.*/MOODLE_VERSION=\"${TARGET_VER}\"/" "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
-    sed -i "s/^IS_MOODLE5=.*/IS_MOODLE5=\"${IS_TARGET_MOODLE5}\"/" "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
+    # Update encrypted vault state
+    local site_json
+    site_json="$(vault_sget "${SLUG}")"
+    if [[ -n "${site_json}" ]]; then
+        site_json="$(echo "${site_json}" | jq \
+            --arg ver "${TARGET_VER}" \
+            --argjson is5 "${IS_TARGET_MOODLE5}" \
+            --arg upgraded_at "$(date -Iseconds)" \
+            '.moodle_version = $ver | .is_moodle5 = $is5 | .upgraded_at = $upgraded_at'
+        )"
+        vault_sset "${SLUG}" "${site_json}"
+    fi
+
+    # Update legacy config if present
+    if [[ -f "${MOODLEKIT_SITES_DIR}/${SLUG}.conf" ]]; then
+        sed -i "s/^MOODLE_VERSION=.*/MOODLE_VERSION=\"${TARGET_VER}\"/" "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
+        sed -i "s/^IS_MOODLE5=.*/IS_MOODLE5=\"${IS_TARGET_MOODLE5}\"/" "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
+    fi
     
     clear_rollbacks
+
     
     print_box "Upgrade Complete: ${SLUG} ✓" \
         "URL:            https://${DOMAIN}" \

@@ -121,7 +121,7 @@ detect_installed() {
     NGINX_INSTALLED=""
     NGINX_INSTALLED_VERSION=""
     if command -v nginx &>/dev/null 2>&1; then
-        NGINX_INSTALLED_VERSION="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        NGINX_INSTALLED_VERSION="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
         NGINX_INSTALLED="yes"
         INSTALLED_TOOLS+=("Nginx ${NGINX_INSTALLED_VERSION}")
     fi
@@ -138,7 +138,7 @@ detect_installed() {
     REDIS_INSTALLED=""
     REDIS_INSTALLED_VERSION=""
     if command -v redis-server &>/dev/null 2>&1; then
-        REDIS_INSTALLED_VERSION="$(redis-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        REDIS_INSTALLED_VERSION="$(redis-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
         REDIS_INSTALLED="yes"
         INSTALLED_TOOLS+=("Redis ${REDIS_INSTALLED_VERSION}")
     fi

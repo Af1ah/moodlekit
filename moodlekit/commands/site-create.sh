@@ -572,7 +572,59 @@ CONFADD
     # Configure ad-hoc task processing (was dead code in reference — now called)
     _configure_task_processing "${ADMIN_CLI}"
 
-    # Save site state
+    # Save site state into Encrypted Binary Vault
+    local site_json
+    site_json="$(jq -n \
+        --arg slug "${SLUG}" \
+        --arg domain "${DOMAIN}" \
+        --arg moodle_version "${MOODLE_VERSION}" \
+        --arg moodle_branch "${MOODLE_BRANCH:-}" \
+        --arg moodle_tag "${MOODLE_TAG:-}" \
+        --argjson is_moodle5 "${IS_MOODLE5}" \
+        --arg moodle_dir "${MOODLE_DIR}" \
+        --arg moodledata_dir "${MOODLEDATA_DIR}" \
+        --arg db_type "${DB_TYPE}" \
+        --arg db_name "${DB_NAME}" \
+        --arg db_user "${DB_USER}" \
+        --arg db_pass "${DB_PASS}" \
+        --arg db_port "${DB_PORT}" \
+        --arg php_version "${PHP_VERSION}" \
+        --arg admin_email "${ADMIN_EMAIL}" \
+        --arg admin_pass "${ADMIN_PASS}" \
+        --arg fpm_pool_conf "${FPM_POOL_CONF}" \
+        --arg fpm_sock "${FPM_SOCK}" \
+        --arg nginx_conf "${NGINX_CONF}" \
+        --argjson use_redis_sessions "${USE_REDIS_SESSIONS}" \
+        --arg type "tenant" \
+        --arg created_at "$(date -Iseconds)" \
+        '{
+            slug: $slug,
+            domain: $domain,
+            moodle_version: $moodle_version,
+            moodle_branch: $moodle_branch,
+            moodle_tag: $moodle_tag,
+            is_moodle5: $is_moodle5,
+            moodle_dir: $moodle_dir,
+            moodledata_dir: $moodledata_dir,
+            db_type: $db_type,
+            db_name: $db_name,
+            db_user: $db_user,
+            db_pass: $db_pass,
+            db_port: $db_port,
+            php_version: $php_version,
+            admin_email: $admin_email,
+            admin_pass: $admin_pass,
+            fpm_pool_conf: $fpm_pool_conf,
+            fpm_sock: $fpm_sock,
+            nginx_conf: $nginx_conf,
+            use_redis_sessions: $use_redis_sessions,
+            type: $type,
+            created_at: $created_at
+        }'
+    )"
+    vault_sset "${SLUG}" "${site_json}"
+
+    # Legacy config compatibility
     mkdir -p "${MOODLEKIT_SITES_DIR}"
     cat > "${MOODLEKIT_SITES_DIR}/${SLUG}.conf" << SITECONF
 # MoodleKit site config — ${SLUG} — $(date)
@@ -601,6 +653,7 @@ SITECONF
     chmod 600 "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
 
     clear_rollbacks
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # Summary

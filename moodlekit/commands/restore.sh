@@ -660,6 +660,52 @@ HTTPONLY
     _configure_task_processing "${ADMIN_CLI}"
     _configure_cron "${slug}" "${MOODLE_DIR}" "${IS_MOODLE5}"
 
+    # Save site state into Encrypted Binary Vault
+    local site_json
+    site_json="$(jq -n \
+        --arg slug "${slug}" \
+        --arg domain "${DOMAIN}" \
+        --arg moodle_version "${MOODLE_VERSION}" \
+        --argjson is_moodle5 "${IS_MOODLE5}" \
+        --arg moodle_dir "${MOODLE_DIR}" \
+        --arg moodledata_dir "${MOODLEDATA_DIR}" \
+        --arg db_type "${bk_db_type}" \
+        --arg db_name "${DB_NAME}" \
+        --arg db_user "${DB_USER}" \
+        --arg db_pass "${DB_PASS}" \
+        --arg db_port "${DB_PORT}" \
+        --arg php_version "${PHP_VERSION}" \
+        --arg fpm_pool_conf "${FPM_POOL_CONF}" \
+        --arg fpm_sock "${FPM_SOCK}" \
+        --arg nginx_conf "${NGINX_CONF}" \
+        --argjson use_redis_sessions "${USE_REDIS:-0}" \
+        --arg restored_from "${backup_path}" \
+        --arg created_at "$(date -Iseconds)" \
+        '{
+            slug: $slug,
+            domain: $domain,
+            moodle_version: $moodle_version,
+            is_moodle5: $is_moodle5,
+            moodle_dir: $moodle_dir,
+            moodledata_dir: $moodledata_dir,
+            db_type: $db_type,
+            db_name: $db_name,
+            db_user: $db_user,
+            db_pass: $db_pass,
+            db_port: $db_port,
+            php_version: $php_version,
+            fpm_pool_conf: $fpm_pool_conf,
+            fpm_sock: $fpm_sock,
+            nginx_conf: $nginx_conf,
+            use_redis_sessions: $use_redis_sessions,
+            restored_from: $restored_from,
+            created_at: $created_at
+        }'
+    )"
+    vault_sset "${slug}" "${site_json}"
+
+    # Legacy config compatibility
+    mkdir -p "${MOODLEKIT_SITES_DIR}"
     cat > "${MOODLEKIT_SITES_DIR}/${slug}.conf" << SITECONF
 SLUG="${slug}"
 DOMAIN="${DOMAIN}"
@@ -682,6 +728,7 @@ CREATED_AT="$(date -Iseconds)"
 SITECONF
     chmod 600 "${MOODLEKIT_SITES_DIR}/${slug}.conf"
     clear_rollbacks
+
 
     print_box "Restore Complete: ${slug} ✓" \
         "URL:    https://${DOMAIN}" \

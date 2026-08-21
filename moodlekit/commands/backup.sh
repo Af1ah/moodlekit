@@ -45,10 +45,11 @@ cmd_backup_site() {
     # Step 2 — Config + state files
     # ─────────────────────────────────────────────────────────────────────────
     step 2 "${steps}" "Config and state files"
-    cp "${MOODLE_DIR}/config.php" "${BACKUP_PATH}/config.php" 2>/dev/null || true
-    cp "${MOODLEKIT_SITES_DIR}/${SLUG}.conf" "${BACKUP_PATH}/site.conf" 2>/dev/null || true
-    [[ -f "${NGINX_CONF}" ]] && cp "${NGINX_CONF}" "${BACKUP_PATH}/nginx.conf" || true
-    [[ -f "${FPM_POOL_CONF}" ]] && cp "${FPM_POOL_CONF}" "${BACKUP_PATH}/fpm-pool.conf" || true
+    [[ -f "${MOODLE_DIR}/config.php" ]] && cp "${MOODLE_DIR}/config.php" "${BACKUP_PATH}/config.php" 2>/dev/null || true
+    vault_sget "${SLUG}" > "${BACKUP_PATH}/site.json" 2>/dev/null || true
+    [[ -f "${MOODLEKIT_SITES_DIR}/${SLUG}.conf" ]] && cp "${MOODLEKIT_SITES_DIR}/${SLUG}.conf" "${BACKUP_PATH}/site.conf" 2>/dev/null || true
+    [[ -n "${NGINX_CONF:-}" && -f "${NGINX_CONF}" ]] && cp "${NGINX_CONF}" "${BACKUP_PATH}/nginx.conf" || true
+    [[ -n "${FPM_POOL_CONF:-}" && -f "${FPM_POOL_CONF}" ]] && cp "${FPM_POOL_CONF}" "${BACKUP_PATH}/fpm-pool.conf" || true
     ok "Config files copied"
 
     if [[ "${DB_ONLY}" == "1" ]]; then
@@ -170,7 +171,7 @@ cmd_backup_all() {
 # ---------------------------------------------------------------------------
 cmd_backup_deploy() {
     require_root
-    load_global_conf
+    load_global_conf 0 || true
     init_logging "backup-deploy"
 
     section "MoodleKit — Deploy Cloud Backup"
@@ -179,9 +180,42 @@ cmd_backup_deploy() {
     mkdir -p "${OPT_DIR}"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Copy Python backup script
+    # Step 1 — Timezone & Schedule Selection
     # ─────────────────────────────────────────────────────────────────────────
-    step 1 5 "Deploy backup script"
+    step 1 6 "Timezone & schedule configuration"
+    local server_tz
+    server_tz="$(configure_system_timezone 0)"
+    
+    local backup_time="02:00"
+    if is_interactive; then
+        local time_choice=""
+        select_one time_choice "Select daily backup schedule time (Current timezone: ${server_tz}):" \
+            "02:00 AM (02:00) [Recommended - Lowest server traffic]" \
+            "01:00 AM (01:00)" \
+            "03:00 AM (03:00)" \
+            "04:00 AM (04:00)" \
+            "11:00 PM (23:00)" \
+            "12:00 AM (00:00 - Midnight)" \
+            "Custom Time (enter HH:MM in 24h format)"
+
+        case "${time_choice}" in
+            *"02:00 AM"*) backup_time="02:00" ;;
+            *"01:00 AM"*) backup_time="01:00" ;;
+            *"03:00 AM"*) backup_time="03:00" ;;
+            *"04:00 AM"*) backup_time="04:00" ;;
+            *"11:00 PM"*) backup_time="23:00" ;;
+            *"12:00 AM"*) backup_time="00:00" ;;
+            *"Custom Time"*)
+                input_text backup_time "Enter time in 24h format HH:MM (e.g. 02:30)" "02:00" '^([01][0-9]|2[0-3]):[0-5][0-9]$' "Must be valid 24h time in HH:MM format"
+                ;;
+        esac
+    fi
+    ok "Backup schedule set to daily at ${backup_time} (${server_tz})"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 2 — Copy Python backup script
+    # ─────────────────────────────────────────────────────────────────────────
+    step 2 6 "Deploy backup engine"
     local src_py="${MOODLEKIT_ROOT}/backup/moodle_backup.py"
     if [[ ! -f "${src_py}" ]]; then
         err "Backup script not found: ${src_py}"
@@ -191,41 +225,40 @@ cmd_backup_deploy() {
         cp "${src_py}" "${OPT_DIR}/moodle_backup.py"
     fi
     chmod 750 "${OPT_DIR}/moodle_backup.py"
-    ok "Backup script deployed to ${OPT_DIR}/moodle_backup.py"
+    ok "Backup engine deployed to ${OPT_DIR}/moodle_backup.py"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Create config.json from example (if not exists)
+    # Step 3 — Create config.json matching exact reference architecture
     # ─────────────────────────────────────────────────────────────────────────
-    step 2 5 "Create config files"
+    step 3 6 "Create configuration & credentials"
     if [[ ! -f "${OPT_DIR}/config.json" ]]; then
-        # Build moodle_sites list from current sites
+        # Build moodle_sites list from vault & scanned sites
         local sites_json='['
         local first=1
-        while IFS= read -r slug; do
-            [[ -z "${slug}" ]] && continue
-            load_site_conf "${slug}"
+        while IFS= read -r sdir; do
+            [[ -z "${sdir}" ]] && continue
             [[ "${first}" -eq 0 ]] && sites_json+=','
-            sites_json+="\"${MOODLE_DIR}\""
+            sites_json+="\"${sdir}\""
             first=0
-        done < <(list_site_slugs)
+        done < <(find_moodle_installations 2>/dev/null)
         sites_json+=']'
 
         cat > "${OPT_DIR}/config.json" << CONFIGJSON
 {
   "server_name": "$(hostname -f)",
   "log_dir": "/var/log/moodlekit",
-  "local_backup_root": "${MOODLEKIT_BACKUP_DIR}",
-  "gdrive_remote": "gdrive:moodlekit-backups",
+  "local_backup_root": "/opt/db_backups",
+  "gdrive_remote": "gdrive:MoodleBackup",
   "moodle_sites": ${sites_json},
   "extra_backup_dirs": [
-    {"name": "nginx-conf", "path": "/etc/nginx/sites-available"},
-    {"name": "moodlekit-conf", "path": "/etc/moodlekit"}
+    "/etc/nginx/sites-available",
+    "/etc/moodlekit"
   ],
   "rclone": {
-    "transfers": 4,
-    "checkers": 8,
-    "tpslimit": 10,
-    "drive_chunk_size": "128M",
+    "transfers": 8,
+    "checkers": 12,
+    "tpslimit": 8,
+    "drive_chunk_size": "32M",
     "bwlimit": "0",
     "extra_flags": []
   },
@@ -238,90 +271,111 @@ cmd_backup_deploy() {
 }
 CONFIGJSON
         chmod 600 "${OPT_DIR}/config.json"
-        ok "config.json created"
+        ok "config.json created (/opt/db_backups -> gdrive:MoodleBackup)"
     else
-        ok "config.json already exists — not overwriting"
+        ok "config.json already exists — preserving existing settings"
+    fi
+
+    # Telegram Notifications Setup
+    local tg_token=""
+    local tg_chat=""
+    if [[ "${MOODLEKIT_YES:-0}" != "1" ]]; then
+        info "Optional: Configure Telegram live backup notifications"
+        input_text tg_token "Telegram Bot Token [Press Enter to skip]" "" '.*' ""
+        if [[ -n "${tg_token}" ]]; then
+            input_text tg_chat "Telegram Chat ID" "" '.*' "Chat ID required"
+            vault_gset "telegram_bot_token" "${tg_token}"
+            vault_gset "telegram_chat_id" "${tg_chat}"
+            ok "Telegram credentials stored in encrypted vault"
+        fi
     fi
 
     if [[ ! -f "${OPT_DIR}/secrets.json" ]]; then
-        cat > "${OPT_DIR}/secrets.json" << 'SECRETJSON'
+        cat > "${OPT_DIR}/secrets.json" << SECRETJSON
 {
-  "telegram_bot_token": "YOUR_BOT_TOKEN_HERE",
-  "telegram_chat_id": "YOUR_CHAT_ID_HERE",
+  "telegram_bot_token": "${tg_token:-YOUR_BOT_TOKEN_HERE}",
+  "telegram_chat_id": "${tg_chat:-YOUR_CHAT_ID_HERE}",
   "drive_client_id": "",
   "drive_client_secret": ""
 }
 SECRETJSON
         chmod 600 "${OPT_DIR}/secrets.json"
-        warn "Fill in secrets: ${OPT_DIR}/secrets.json"
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Install systemd service + timer
+    # Step 4 — Install systemd service + customized timer
     # ─────────────────────────────────────────────────────────────────────────
-    step 3 5 "Install systemd service + timer"
+    step 4 6 "Install systemd service + timer"
     cp "${MOODLEKIT_TPL}/systemd-backup.service" \
        /etc/systemd/system/moodlekit-backup.service
-    cp "${MOODLEKIT_TPL}/systemd-backup.timer" \
-       /etc/systemd/system/moodlekit-backup.timer
+
+    cat > /etc/systemd/system/moodlekit-backup.timer << TIMERF
+[Unit]
+Description=Run MoodleKit cloud backup daily at ${backup_time} (${server_tz})
+
+[Timer]
+OnCalendar=*-*-* ${backup_time}:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMERF
 
     systemctl daemon-reload
-    ok "systemd units installed"
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Enable and start timer
-    # ─────────────────────────────────────────────────────────────────────────
-    step 4 5 "Enable backup timer"
     systemctl enable --now moodlekit-backup.timer
-    ok "Timer enabled — daily at 02:00 + up to 5min random jitter"
+    ok "Timer active: Daily at ${backup_time} (${server_tz}) + up to 5min jitter"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Install rclone
+    # Step 5 — Install rclone
     # ─────────────────────────────────────────────────────────────────────────
-    step 5 6 "Install rclone"
+    step 5 6 "Verify rclone installation"
     if ! command -v rclone &>/dev/null; then
         spinner_start "Installing latest rclone..."
         curl -s https://rclone.org/install.sh | sudo bash &>> "${_LOG_FILE}" || true
         spinner_stop 0 "rclone installed"
     else
-        ok "rclone found: $(rclone --version | head -1)"
+        ok "rclone found: $(rclone --version 2>/dev/null | head -1)"
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Configure Google Drive Headless
+    # Step 6 — Configure Google Drive Headless
     # ─────────────────────────────────────────────────────────────────────────
-    step 6 6 "Configure Google Drive (Headless)"
-    info "We will now configure Google Drive."
-    info "You will need your Google API Client ID and Client Secret."
-    
-    local drive_client_id=""
-    input_text drive_client_id "Google Drive Client ID" "" '.*' "Required"
-    
-    local drive_client_secret=""
-    input_text drive_client_secret "Google Drive Client Secret" "" '.*' "Required"
+    step 6 6 "Configure Google Drive remote ('gdrive')"
+    local rclone_conf="/root/.config/rclone/rclone.conf"
+    if [[ -f "${rclone_conf}" ]] && grep -q '\[gdrive\]' "${rclone_conf}"; then
+        ok "Google Drive remote '[gdrive]' already exists in ${rclone_conf}"
+    else
+        info "Configuring Google Drive remote..."
+        local drive_client_id=""
+        input_text drive_client_id "Google Drive Client ID [Press enter to use default]" "" '.*' ""
+        
+        local drive_client_secret=""
+        if [[ -n "${drive_client_id}" ]]; then
+            input_text drive_client_secret "Google Drive Client Secret" "" '.*' "Required if Client ID provided"
+            vault_gset "drive_client_id" "${drive_client_id}"
+            vault_gset "drive_client_secret" "${drive_client_secret}"
+            jq ".drive_client_id = \"${drive_client_id}\" | .drive_client_secret = \"${drive_client_secret}\"" "${OPT_DIR}/secrets.json" > "${OPT_DIR}/secrets.tmp.json" 2>/dev/null || true
+            [[ -f "${OPT_DIR}/secrets.tmp.json" ]] && mv "${OPT_DIR}/secrets.tmp.json" "${OPT_DIR}/secrets.json" || true
+        fi
 
-    # Save to secrets.json
-    jq ".drive_client_id = \"${drive_client_id}\" | .drive_client_secret = \"${drive_client_secret}\"" "${OPT_DIR}/secrets.json" > "${OPT_DIR}/secrets.tmp.json"
-    mv "${OPT_DIR}/secrets.tmp.json" "${OPT_DIR}/secrets.json"
+        echo ""
+        info "Headless Authorization Step:"
+        info "1. Open a terminal on your personal computer (with a web browser)."
+        info "2. Run this command on your computer:"
+        if [[ -n "${drive_client_id}" && -n "${drive_client_secret}" ]]; then
+            echo -e "${C_BOLD_YELLOW}rclone authorize \"drive\" \"${drive_client_id}\" \"${drive_client_secret}\"${C_RESET}"
+        else
+            echo -e "${C_BOLD_YELLOW}rclone authorize \"drive\"${C_RESET}"
+        fi
+        info "3. Log in to Google, grant permissions, and copy the full token JSON output string."
+        echo ""
 
-    echo ""
-    info "Because this server has no web browser, you must authorize on your personal computer."
-    info "1. Download rclone on your personal computer (https://rclone.org/downloads/)"
-    info "2. Open a terminal/command prompt on your personal computer and run THIS EXACT COMMAND:"
-    echo -e "${C_BOLD_YELLOW}rclone authorize \"drive\" \"${drive_client_id}\" \"${drive_client_secret}\"${C_RESET}"
-    info "3. It will open your web browser. Log in and grant full permissions."
-    info "4. It will output a long 'token' string that looks like: {\"access_token\":\"...\"...}"
-    echo ""
+        local drive_token=""
+        input_text drive_token "Paste the entire token string here" "" '^\{.*\}$' "Token must be a valid JSON string starting with {"
 
-    local drive_token=""
-    input_text drive_token "Paste the entire token string here" "" '^\{.*\}$' "Token must be a valid JSON string starting with {"
-
-    # Create rclone config manually
-    local rclone_conf_dir
-    rclone_conf_dir="/root/.config/rclone"
-    mkdir -p "${rclone_conf_dir}"
-    
-    cat > "${rclone_conf_dir}/rclone.conf" << RCLONECONF
+        mkdir -p "/root/.config/rclone"
+        cat > "${rclone_conf}" << RCLONECONF
 [gdrive]
 type = drive
 client_id = ${drive_client_id}
@@ -329,17 +383,15 @@ client_secret = ${drive_client_secret}
 scope = drive
 token = ${drive_token}
 RCLONECONF
-    chmod 600 "${rclone_conf_dir}/rclone.conf"
-    
-    ok "Google Drive configured securely as 'gdrive'."
+        chmod 600 "${rclone_conf}"
+        ok "Google Drive remote configured securely as 'gdrive'."
+    fi
 
-    print_box "Cloud Backup Deployed ✓" \
-        "Script:  ${OPT_DIR}/moodle_backup.py" \
-        "Config:  ${OPT_DIR}/config.json" \
-        "Secrets: ${OPT_DIR}/secrets.json" \
-        "" \
-        "Next steps:" \
-        "  1. Edit secrets.json to set your Telegram tokens" \
-        "  2. Test manually: python3 ${OPT_DIR}/moodle_backup.py --config ${OPT_DIR}/config.json --secrets ${OPT_DIR}/secrets.json" \
-        "  3. Check timer: systemctl list-timers moodlekit-backup*"
+    print_box "Cloud Backup Deployed Successfully ✓" \
+        "Schedule:     Daily at ${backup_time} (${server_tz})" \
+        "Remote:       gdrive:MoodleBackup/{hostname}/{domain}/" \
+        "Local Dumps:  /opt/db_backups/{hostname}/{domain}/" \
+        "Script:       ${OPT_DIR}/moodle_backup.py" \
+        "Config:       ${OPT_DIR}/config.json" \
+        "Timer:        systemctl list-timers moodlekit-backup*"
 }

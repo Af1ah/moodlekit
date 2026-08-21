@@ -1,45 +1,60 @@
 #!/usr/bin/env bash
 # =============================================================================
-# commands/site-list.sh — List managed Moodle sites
+# commands/site-list.sh — List managed Moodle sites from encrypted vault
 # =============================================================================
 
 cmd_site_list() {
-    load_global_conf
+    load_global_conf 0 || true
 
-    local slugs
-    mapfile -t slugs < <(list_site_slugs)
+    local slugs=()
+    while IFS= read -r s; do
+        [[ -n "${s}" ]] && slugs+=("${s}")
+    done < <(list_site_slugs)
 
     if [[ ${#slugs[@]} -eq 0 ]]; then
-        info "No Moodle sites managed by MoodleKit on this server."
+        info "No Moodle sites currently registered in MoodleKit's encrypted vault."
+        
+        # Check for unmanaged sites
+        local unmanaged=()
+        while IFS= read -r udir; do
+            [[ -n "${udir}" ]] && unmanaged+=("${udir}")
+        done < <(find_moodle_installations 2>/dev/null)
+        
+        if [[ ${#unmanaged[@]} -gt 0 ]]; then
+            echo ""
+            info "Discovered unmanaged Moodle installations on server:"
+            for u in "${unmanaged[@]}"; do
+                echo -e "  • ${u} (run 'moodlekit adopt \"${u}\"' to manage)"
+            done
+        fi
         return 0
     fi
 
     section "MoodleKit — Managed Sites"
     
-    printf "%-15s | %-25s | %-10s | %-8s | %-12s | %-10s\n" "SLUG" "DOMAIN" "MOODLE" "PHP" "DATABASE" "FPM WORKERS"
-    printf "%s\n" "------------------------------------------------------------------------------------------------------"
+    printf "%-14s | %-24s | %-8s | %-8s | %-12s | %-10s | %-10s\n" "SLUG" "DOMAIN" "MOODLE" "PHP" "DATABASE" "TYPE" "FPM WORKERS"
+    printf "%s\n" "---------------------------------------------------------------------------------------------------------------"
 
     for slug in "${slugs[@]}"; do
-        # We source the site conf in a subshell to avoid polluting variables between iterations
         (
-            load_site_conf "${slug}"
+            load_site_conf "${slug}" 0 || true
             
-            # Determine FPM workers from pool conf
             local fpm_workers="?"
-            if [[ -f "${FPM_POOL_CONF}" ]]; then
+            if [[ -n "${FPM_POOL_CONF:-}" && -f "${FPM_POOL_CONF}" ]]; then
                 fpm_workers=$(grep -E '^pm\.max_children' "${FPM_POOL_CONF}" | awk -F'=' '{print $2}' | tr -d ' ')
             fi
 
-            printf "%-15s | %-25s | %-10s | %-8s | %-12s | %-10s\n" \
+            printf "%-14s | %-24s | %-8s | %-8s | %-12s | %-10s | %-10s\n" \
                 "${slug}" \
-                "${DOMAIN}" \
-                "${MOODLE_VERSION}" \
-                "${PHP_VERSION}" \
-                "${DB_TYPE}" \
+                "${DOMAIN:-unknown}" \
+                "${MOODLE_VERSION:-unknown}" \
+                "${PHP_VERSION:-unknown}" \
+                "${DB_TYPE:-unknown}" \
+                "${TYPE:-managed}" \
                 "${fpm_workers}"
         )
     done
     
     echo ""
-    info "Total sites: ${#slugs[@]}"
+    info "Total managed sites: ${#slugs[@]}"
 }

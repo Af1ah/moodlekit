@@ -140,6 +140,7 @@ cmd_site_remove() {
     # Step 9 — Remove state + rebalance FPM
     # ─────────────────────────────────────────────────────────────────────────
     step 9 9 "Remove state + rebalance FPM pools"
+    vault_sdel "${SLUG}"
     rm -f "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
     rm -f "/tmp/moodlekit-${SLUG}.lock"
 
@@ -147,9 +148,9 @@ cmd_site_remove() {
     local remaining
     remaining="$(list_site_slugs | wc -l)"
     if (( remaining > 0 )); then
-        rebalance_fpm_pools "${DB_TYPE}"
+        rebalance_fpm_pools "${DB_TYPE:-mariadb}"
     fi
 
-    ok "Site '${SLUG}' fully removed"
+    ok "Site '${SLUG}' fully removed from encrypted vault and server"
     clear_rollbacks
 }

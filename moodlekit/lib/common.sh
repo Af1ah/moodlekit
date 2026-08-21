@@ -16,18 +16,22 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Paths & version
 # ---------------------------------------------------------------------------
-MOODLEKIT_VERSION="1.0.0"
-MOODLEKIT_STATE_DIR="/etc/moodlekit"
-MOODLEKIT_SITES_DIR="${MOODLEKIT_STATE_DIR}/sites"
-MOODLEKIT_LOG_DIR="/var/log/moodlekit"
-MOODLEKIT_BACKUP_DIR="/var/backups/moodlekit"
-MOODLEKIT_OPT_DIR="/opt/moodlekit"
+MOODLEKIT_VERSION="${MOODLEKIT_VERSION:-2.0.0}"
+MOODLEKIT_STATE_DIR="${MOODLEKIT_STATE_DIR:-/etc/moodlekit}"
+MOODLEKIT_SITES_DIR="${MOODLEKIT_SITES_DIR:-${MOODLEKIT_STATE_DIR}/sites}"
+MOODLEKIT_LOG_DIR="${MOODLEKIT_LOG_DIR:-/var/log/moodlekit}"
+MOODLEKIT_BACKUP_DIR="${MOODLEKIT_BACKUP_DIR:-/var/backups/moodlekit}"
+MOODLEKIT_OPT_DIR="${MOODLEKIT_OPT_DIR:-/opt/moodlekit}"
 
 # Determine script root (where moodlekit binary lives)
 MOODLEKIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MOODLEKIT_LIB="${MOODLEKIT_ROOT}/lib"
 MOODLEKIT_CMD="${MOODLEKIT_ROOT}/commands"
 MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
+
+# shellcheck source=lib/vault.sh
+[[ -f "${MOODLEKIT_LIB}/vault.sh" ]] && source "${MOODLEKIT_LIB}/vault.sh"
+
 
 # ---------------------------------------------------------------------------
 # Colors (disabled when NO_COLOR is set or output is not a terminal)
@@ -311,36 +315,63 @@ moodle_admin_cli() {
 }
 
 # ---------------------------------------------------------------------------
-# Global config helpers
+# Global & Site config helpers (Backed by Encrypted Binary Vault)
 # ---------------------------------------------------------------------------
 load_global_conf() {
+    local required="${1:-0}"
+    if type vault_load_global &>/dev/null && vault_load_global; then
+        return 0
+    fi
     local conf="${MOODLEKIT_STATE_DIR}/global.conf"
     if [[ -f "${conf}" ]]; then
         # shellcheck source=/dev/null
         source "${conf}"
-    else
-        err "Global config not found: ${conf}"
+        return 0
+    fi
+
+    if [[ "${required}" == "1" ]]; then
+        err "Global configuration not found in encrypted vault or ${conf}"
         err "Run 'moodlekit bootstrap' first."
         exit 1
     fi
+    # Provide safe fallback defaults so status and diagnostic tools never crash
+    BASE_DOMAIN="${BASE_DOMAIN:-}"
+    PHP_VERSION="${PHP_VERSION:-8.3}"
+    DB_TYPE="${DB_TYPE:-postgres}"
+    USE_REDIS="${USE_REDIS:-0}"
+    USE_MEMCACHED="${USE_MEMCACHED:-0}"
+    return 1
 }
 
 load_site_conf() {
     local slug="$1"
+    local required="${2:-1}"
+    if type vault_load_site &>/dev/null && vault_load_site "${slug}"; then
+        return 0
+    fi
     local conf="${MOODLEKIT_SITES_DIR}/${slug}.conf"
     if [[ -f "${conf}" ]]; then
         # shellcheck source=/dev/null
         source "${conf}"
-    else
-        err "Site config not found for slug '${slug}': ${conf}"
-        err "Available sites: $(list_site_slugs | tr '\n' ' ')"
+        return 0
+    fi
+    if [[ "${required}" == "1" ]]; then
+        err "Site config not found for '${slug}' in encrypted vault or ${conf}"
+        local avail
+        avail="$(list_site_slugs | tr '\n' ' ')"
+        [[ -n "${avail}" ]] && err "Available sites: ${avail}"
         exit 1
     fi
+    return 1
 }
 
 list_site_slugs() {
-    find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null \
-        | sed 's|.*/||; s|\.conf$||' | sort
+    if type vault_slist &>/dev/null; then
+        vault_slist
+    else
+        find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null \
+            | sed 's|.*/||; s|\.conf$||' | sort
+    fi
 }
 
 list_removable_slugs() {
@@ -350,11 +381,40 @@ list_removable_slugs() {
     } | sort -u
 }
 
-
 site_exists() {
     local slug="$1"
+    if type vault_site_exists &>/dev/null && vault_site_exists "${slug}"; then
+        return 0
+    fi
     [[ -f "${MOODLEKIT_SITES_DIR}/${slug}.conf" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Moodle Site Discovery (Auto-detect standalone & unmanaged Moodle sites)
+# ---------------------------------------------------------------------------
+find_moodle_installations() {
+    local search_dirs=("/var/www" "/var/www/html" "/var/www/moodle" "/home" "/opt")
+    local found_dirs=()
+
+    for base in "${search_dirs[@]}"; do
+        [[ -d "${base}" ]] || continue
+        # Find directories with version.php
+        while IFS= read -r vfile; do
+            local mdir
+            mdir="$(dirname "${vfile}")"
+            # Check if it looks like Moodle
+            if grep -qE "(\$release|\$version)\s*=" "${vfile}" 2>/dev/null; then
+                found_dirs+=("${mdir}")
+            fi
+        done < <(find "${base}" -maxdepth 5 -name "version.php" -type f 2>/dev/null)
+    done
+
+    # Print unique directories
+    if [[ ${#found_dirs[@]} -gt 0 ]]; then
+        printf '%s\n' "${found_dirs[@]}" | sort -u
+    fi
+}
+
 
 # ---------------------------------------------------------------------------
 # Slug validation
@@ -479,6 +539,82 @@ human_size() {
     else
         echo "${bytes}B"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Timezone Management & Interactive Configuration
+# ---------------------------------------------------------------------------
+get_system_timezone() {
+    local tz=""
+    if command -v timedatectl &>/dev/null; then
+        tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    fi
+    if [[ -z "${tz}" && -f "/etc/timezone" ]]; then
+        tz="$(cat /etc/timezone 2>/dev/null | tr -d ' \n\r' || true)"
+    fi
+    if [[ -z "${tz}" && -L "/etc/localtime" ]]; then
+        tz="$(readlink /etc/localtime 2>/dev/null | sed -E 's|.*/zoneinfo/||' || true)"
+    fi
+    echo "${tz:-UTC}"
+}
+
+configure_system_timezone() {
+    local force_prompt="${1:-0}"
+    local current_tz
+    current_tz="$(get_system_timezone)"
+    
+    local target_tz="${current_tz}"
+    
+    if is_interactive && { [[ "${force_prompt}" == "1" ]] || [[ "${current_tz}" == "Etc/UTC" || "${current_tz}" == "UTC" || -z "${current_tz}" ]]; }; then
+        info "System Timezone Configuration (Current: ${current_tz})"
+        local tz_choice=""
+        select_one tz_choice "Select system timezone:" \
+            "Asia/Kolkata (IST, UTC+05:30) [Recommended]" \
+            "UTC (Coordinated Universal Time)" \
+            "Asia/Dubai (GST, UTC+04:00)" \
+            "Asia/Singapore (SGT, UTC+08:00)" \
+            "Asia/Riyadh (AST, UTC+03:00)" \
+            "Europe/London (GMT/BST, UTC+00:00)" \
+            "America/New_York (EST/EDT, UTC-05:00)" \
+            "Keep Current (${current_tz})" \
+            "Enter custom timezone string"
+            
+        case "${tz_choice}" in
+            *"Asia/Kolkata"*) target_tz="Asia/Kolkata" ;;
+            *"UTC ("*) target_tz="UTC" ;;
+            *"Asia/Dubai"*) target_tz="Asia/Dubai" ;;
+            *"Asia/Singapore"*) target_tz="Asia/Singapore" ;;
+            *"Asia/Riyadh"*) target_tz="Asia/Riyadh" ;;
+            *"Europe/London"*) target_tz="Europe/London" ;;
+            *"America/New_York"*) target_tz="America/New_York" ;;
+            *"Keep Current"*) target_tz="${current_tz}" ;;
+            *"Enter custom"*)
+                input_text target_tz "Enter IANA timezone (e.g. Europe/Berlin, Asia/Kolkata)" "${current_tz}" '^[A-Za-z0-9_\+\/-]+$' "Valid timezone format required"
+                ;;
+        esac
+    fi
+    
+    # Apply timezone if changed or requested
+    if [[ -n "${target_tz}" ]]; then
+        if command -v timedatectl &>/dev/null; then
+            timedatectl set-timezone "${target_tz}" 2>/dev/null || true
+        elif [[ -f "/usr/share/zoneinfo/${target_tz}" ]]; then
+            ln -sf "/usr/share/zoneinfo/${target_tz}" /etc/localtime
+            echo "${target_tz}" > /etc/timezone 2>/dev/null || true
+        fi
+        
+        # Update PHP INI date.timezone across all PHP versions
+        for php_ini in /etc/php/*/cli/php.ini /etc/php/*/fpm/php.ini; do
+            if [[ -f "${php_ini}" ]]; then
+                sed -i "s|^;\?date\.timezone\s*=.*|date.timezone = ${target_tz}|" "${php_ini}" 2>/dev/null || true
+            fi
+        done
+        
+        vault_gset "timezone" "${target_tz}" 2>/dev/null || true
+        ok "System & PHP timezone configured: ${target_tz}"
+    fi
+    
+    echo "${target_tz}"
 }
 
 # ---------------------------------------------------------------------------

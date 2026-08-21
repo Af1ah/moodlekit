@@ -1,14 +1,21 @@
 # MoodleKit
 
-A comprehensive, modular CLI tool for provisioning and managing Moodle servers and tenants on Ubuntu (22.04 / 24.04).
+A comprehensive, modular CLI toolkit for diagnosing, repairing, managing, provisioning, and backing up Moodle LMS installations and servers on Ubuntu (22.04 / 24.04).
 
-## Features
-- **Server Bootstrap**: Installs PHP (8.1/8.3/8.4), Nginx, PostgreSQL/MariaDB/MySQL, Redis, Memcached, Certbot, UFW, and fail2ban.
-- **Tenant Provisioning**: 12-step automated creation of Moodle 4.x or 5.x tenants with automatic database creation, code cloning, Nginx vhost setup, Let's Encrypt TLS, and cron configuration.
-- **Auto-Tuning**: RAM-aware calculation of PHP-FPM workers, database buffers, and Redis maxmemory based on available hardware and number of active sites.
-- **Cloud Backups**: Integrated Python-based backup script wrapping `rclone` for automated Google Drive syncing with live Telegram progress updates.
-- **Two-Method Restore**: Restore backups in-place to an existing tenant, or provision a fresh instance directly from a backup manifest.
-- **Rollback System**: Atomic operations during provisioning — if a step fails, the LIFO rollback stack unwinds the changes cleanly.
+Supports both **Standalone Moodle sites** (located anywhere on disk) and **Multi-Tenant clusters**, backed by an **AES-256 Encrypted Binary Vault** for secure credential management.
+
+---
+
+## Key Features
+
+- **Moodle Doctor & Fixer (`moodlekit fix`)**: Automated diagnostics and 1-click repair for file permissions, dataroot corruption, database connectivity, table repair, PHP configuration limits, missing PHP-FPM pools, Nginx vhost routing, cron execution, task queue locks, and cache purging.
+- **Standalone Site Adoption (`moodlekit adopt`)**: Discover existing unmanaged Moodle installations across your server and seamlessly register them into MoodleKit management.
+- **AES-256 Encrypted Binary Vault**: Replaces plaintext `.conf` and `secrets.json` files with authenticated AES-256-CBC + HMAC-SHA256 (PBKDF2 100,000 iterations) storage (`/etc/moodlekit/vault.bin`), protected by a strict `0600` master key.
+- **Server Bootstrap & Auto-Tuning**: Non-destructive server provisioning for PHP (8.1/8.3/8.4), Nginx, PostgreSQL 17/MariaDB/MySQL, Redis, Memcached, Certbot, UFW, and fail2ban, with RAM-aware dynamic auto-tuning.
+- **Automated Cloud Backups & Cloud Sync**: Local backup generation (database dump, config, dataroot, and manifest) + automated Google Drive sync via `rclone` with live Telegram progress notifications.
+- **Flexible 3-Method Restore**: Restore in-place into existing sites, provision fresh instances from backup manifests, or perform legacy recovery from raw `.sql` and data archives.
+
+---
 
 ## Installation
 
@@ -16,46 +23,77 @@ A comprehensive, modular CLI tool for provisioning and managing Moodle servers a
 sudo ./install.sh
 ```
 
+---
+
 ## Usage
 
-### 1. Server Bootstrap
-Run this once on a fresh Ubuntu server:
+### 1. Moodle Doctor & Repair (Fix Common Issues)
+Diagnose and repair permissions, dataroot, database, PHP-FPM pools, Nginx, and caches:
 ```bash
-sudo moodlekit bootstrap
+sudo moodlekit fix
+# Or target a specific site or path:
+sudo moodlekit fix mysite
+sudo moodlekit fix /var/www/html
 ```
-Follow the interactive prompts to select your stack (PHP version, Database type, Caching, etc.).
 
-### 2. Create a Site
+### 2. Adopt an Existing Standalone Moodle Site
+Discover and register existing Moodle installations on your server into the encrypted vault:
+```bash
+sudo moodlekit adopt
+# Or specify path:
+sudo moodlekit adopt /var/www/html mysite
+```
+
+### 3. Server Status & Diagnostics
+Check server health, running services, encrypted vault state, and detected Moodle instances:
+```bash
+sudo moodlekit status
+```
+
+### 4. Create a New Moodle Site / Tenant
 ```bash
 sudo moodlekit site create mysite
 ```
-Follow the prompts to select Moodle version (e.g. 5.2 or 4.5). The script handles cloning, installation, Nginx configuration, TLS, and cron setup.
+Follow interactive prompts to select Moodle version (5.2 or 4.5 LTS), domain, database, and caching.
 
-### 3. List Sites
+### 5. List Managed & Unmanaged Sites
 ```bash
 sudo moodlekit site list
 ```
 
-### 4. Backups
-Deploy the cloud backup system (runs daily via systemd):
+### 6. Upgrade a Moodle Site
+```bash
+sudo moodlekit site upgrade mysite
+```
+
+### 7. Backups & Cloud Sync
+Deploy automated daily cloud backups with live Telegram progress:
 ```bash
 sudo moodlekit backup deploy
 ```
-*Note: Edit `/opt/moodlekit-data/backup/config.json` and `secrets.json` to configure rclone and Telegram.*
 
-Run a manual local backup:
+Run a manual backup of a site:
 ```bash
 sudo moodlekit backup mysite
+# Or backup all sites:
+sudo moodlekit backup all
 ```
 
-### 5. Server Tuning
-Recalculate and apply memory limits (e.g. after adding more RAM):
+### 8. Restore a Site
+```bash
+sudo moodlekit restore mysite /var/backups/moodlekit/mysite/20260821_120000
+# Or manual recovery from raw SQL:
+sudo moodlekit restore manual
+```
+
+### 9. Encrypted Vault Management
+```bash
+sudo moodlekit vault status
+sudo moodlekit vault dump
+```
+
+### 10. Server Performance Tuning
 ```bash
 sudo moodlekit tune balanced
 ```
-
-### 6. Status
-View server health, hardware, and service status:
-```bash
-sudo moodlekit status
-```
+Modes: `balanced`, `conservative`, `aggressive`.

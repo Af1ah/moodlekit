@@ -24,6 +24,7 @@ cp -r lib commands templates backup moodlekit "${DEST_DIR}/"
 chmod +x "${DEST_DIR}/moodlekit"
 find "${DEST_DIR}/commands" -type f -name "*.sh" -exec chmod +x {} \;
 find "${DEST_DIR}/lib" -type f -name "*.sh" -exec chmod +x {} \;
+chmod +x "${DEST_DIR}/lib/vault.py"
 chmod +x "${DEST_DIR}/backup/moodle_backup.py"
 
 # Create symlink

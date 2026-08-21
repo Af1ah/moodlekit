@@ -24,7 +24,9 @@ cmd_site_list() {
             echo ""
             info "Discovered unmanaged Moodle installations on server:"
             for u in "${unmanaged[@]}"; do
-                echo -e "  • ${u} (run 'moodlekit adopt \"${u}\"' to manage)"
+                local u_ver
+                u_ver="$(detect_moodle_version_string "${u}")"
+                echo -e "  • ${u} (Moodle ${u_ver}) — run 'moodlekit adopt \"${u}\"' to manage"
             done
         fi
         return 0

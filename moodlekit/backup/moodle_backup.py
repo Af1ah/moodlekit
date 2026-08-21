@@ -458,8 +458,12 @@ def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
     result: List[Path] = []
 
     def add_site(path_obj: Path):
+        # Support both traditional and Moodle 5.1+ public/ layouts
         cfg = path_obj / "config.php"
-        if cfg.exists() and (path_obj / "version.php").exists():
+        if not cfg.exists() and (path_obj / "public" / "config.php").exists():
+            cfg = path_obj / "public" / "config.php"
+
+        if cfg.exists():
             try:
                 cfg_vals = parse_moodle_config(cfg)
                 if cfg_vals.get("dbname") and cfg_vals.get("dataroot"):
@@ -493,7 +497,9 @@ def discover_all_moodle_sites(config_sites: List[str]) -> List[Path]:
             for cfg in root.glob("**/config.php"):
                 # Avoid deep nested node_modules or cache
                 if "node_modules" not in str(cfg) and "cache" not in str(cfg):
-                    if (cfg.parent / "version.php").exists():
+                    if cfg.parent.name == "public" and cfg.parent.parent.exists():
+                        add_site(cfg.parent.parent)
+                    else:
                         add_site(cfg.parent)
 
     return result

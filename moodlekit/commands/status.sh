@@ -129,11 +129,9 @@ cmd_status() {
         echo ""
         echo -e "${C_BOLD_YELLOW}Discovered Unmanaged Moodle Installations:${C_RESET}"
         for u in "${unmanaged_sites[@]}"; do
-            local u_ver="unknown"
-            if [[ -f "${u}/version.php" ]]; then
-                u_ver=$(grep -E '^\$release\s*=' "${u}/version.php" 2>/dev/null | head -1 | cut -d"'" -f2 || echo "unknown")
-            fi
-            echo -e "  ⚠  ${u} (${u_ver})"
+            local u_ver
+            u_ver="$(detect_moodle_version_string "${u}")"
+            echo -e "  ⚠  ${u} (Moodle ${u_ver})"
             echo -e "     ${C_DIM}→ To manage/fix/backup this site, run: moodlekit adopt \"${u}\"${C_RESET}"
         done
     fi

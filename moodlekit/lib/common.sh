@@ -256,35 +256,134 @@ render_template_to_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Moodle version/structure detection
+# Moodle 4.x & 5.x/5.1+ File Architecture Resolution Helpers
 # ---------------------------------------------------------------------------
+
+# Resolves the path to version.php (supports 4.x root and 5.x / 5.1+ public/ layout)
+find_moodle_version_file() {
+    local moodle_dir="$1"
+    if [[ -f "${moodle_dir}/version.php" ]]; then
+        echo "${moodle_dir}/version.php"
+    elif [[ -f "${moodle_dir}/public/version.php" ]]; then
+        echo "${moodle_dir}/public/version.php"
+    elif [[ -f "${moodle_dir}/admin/version.php" ]]; then
+        echo "${moodle_dir}/admin/version.php"
+    elif [[ -f "${moodle_dir}/lib/version.php" ]]; then
+        echo "${moodle_dir}/lib/version.php"
+    else
+        echo ""
+    fi
+}
+
+# Resolves the path to config.php (checks root and public/)
+find_moodle_config_file() {
+    local moodle_dir="$1"
+    if [[ -f "${moodle_dir}/config.php" ]]; then
+        echo "${moodle_dir}/config.php"
+    elif [[ -f "${moodle_dir}/public/config.php" ]]; then
+        echo "${moodle_dir}/public/config.php"
+    else
+        echo ""
+    fi
+}
+
+# Resolves path to admin/cli directory
+find_moodle_admin_cli() {
+    local moodle_dir="$1"
+    if [[ -d "${moodle_dir}/public/admin/cli" ]]; then
+        echo "${moodle_dir}/public/admin/cli"
+    elif [[ -d "${moodle_dir}/admin/cli" ]]; then
+        echo "${moodle_dir}/admin/cli"
+    else
+        echo "${moodle_dir}/admin/cli"
+    fi
+}
+
+# Returns the document root (web-accessible directory for Nginx)
+get_moodle_docroot() {
+    local moodle_dir="$1"
+    if [[ -d "${moodle_dir}/public" && (-f "${moodle_dir}/public/index.php" || -f "${moodle_dir}/public/version.php") ]]; then
+        echo "${moodle_dir}/public"
+    elif [[ -d "${moodle_dir}/public" ]]; then
+        echo "${moodle_dir}/public"
+    else
+        echo "${moodle_dir}"
+    fi
+}
+
+# Checks whether directory is a genuine Moodle installation (supports 4.x and 5.x)
+is_moodle_directory() {
+    local moodle_dir="$1"
+    [[ ! -d "${moodle_dir}" ]] && return 1
+    
+    local vfile cfgfile
+    vfile="$(find_moodle_version_file "${moodle_dir}")"
+    cfgfile="$(find_moodle_config_file "${moodle_dir}")"
+    
+    if [[ -n "${vfile}" && -f "${vfile}" ]]; then
+        return 0
+    fi
+    if [[ -n "${cfgfile}" && -f "${cfgfile}" ]]; then
+        if grep -qE "(\\\$CFG->db|\$CFG->wwwroot|\$CFG->dataroot|setup\.php)" "${cfgfile}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [[ -f "${moodle_dir}/lib/setup.php" || -f "${moodle_dir}/public/lib/setup.php" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Extracts release version string (e.g. "5.1", "5.2", "4.5")
+detect_moodle_version_string() {
+    local moodle_dir="$1"
+    local vfile
+    vfile="$(find_moodle_version_file "${moodle_dir}")"
+    local release=""
+    if [[ -n "${vfile}" && -f "${vfile}" ]]; then
+        release="$(grep -E '^\$release\s*=' "${vfile}" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    if [[ -z "${release}" && -f "${moodle_dir}/composer.json" ]]; then
+        release="$(grep -E '"version":' "${moodle_dir}/composer.json" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    if [[ -z "${release}" && -d "${moodle_dir}/public" ]]; then
+        release="5.1"
+    fi
+    echo "${release:-4.5}"
+}
+
 # Returns: "4" or "5"
 detect_moodle_major() {
     local moodle_dir="$1"
-    local ver_file="${moodle_dir}/version.php"
-    [[ -f "${ver_file}" ]] || { err "No version.php found in ${moodle_dir}"; return 1; }
-    local release
-    release="$(grep -E '^\$release\s*=' "${ver_file}" | head -1 | grep -oE '[0-9]+\.[0-9]')"
-    local major="${release%%.*}"
-    echo "${major}"
+    local ver
+    ver="$(detect_moodle_version_string "${moodle_dir}")"
+    echo "${ver%%.*}"
 }
 
-# ---------------------------------------------------------------------------
+# Returns 1 if Moodle 5.x / 5.1+, 0 otherwise
+detect_is_moodle5() {
+    local moodle_dir="$1"
+    local ver
+    ver="$(detect_moodle_version_string "${moodle_dir}")"
+    local major="${ver%%.*}"
+    if (( major >= 5 )) || [[ -d "${moodle_dir}/public" ]]; then
+        echo "1"
+    else
+        echo "0"
+    fi
+}
+
 # Convert a "major.minor" version string to the correct Moodle git branch name
-# e.g. "4.5" -> "MOODLE_405_STABLE", "5.2" -> "MOODLE_502_STABLE"
-# The branch number is: major * 100 + minor
-# ---------------------------------------------------------------------------
 moodle_version_to_branch() {
     local version="$1"
     local major="${version%%.*}"
     local minor="${version##*.}"
-    # Strip any extra segments (e.g. 4.5.1 → minor=5)
     minor="${minor%%.*}"
     local branch_num=$(( major * 100 + minor ))
     echo "MOODLE_${branch_num}_STABLE"
 }
 
-# Returns: "traditional" or "public"
+# Backward compatibility wrappers
 detect_moodle_structure() {
     local moodle_dir="$1"
     if [[ -d "${moodle_dir}/public" ]]; then
@@ -294,24 +393,12 @@ detect_moodle_structure() {
     fi
 }
 
-# Returns the document root (web-accessible directory)
 moodle_webroot() {
-    local moodle_dir="$1"
-    local structure
-    structure="$(detect_moodle_structure "${moodle_dir}")"
-    if [[ "${structure}" == "public" ]]; then
-        echo "${moodle_dir}/public"
-    else
-        echo "${moodle_dir}"
-    fi
+    get_moodle_docroot "$1"
 }
 
-# Returns path to admin/cli directory
 moodle_admin_cli() {
-    local moodle_dir="$1"
-    local webroot
-    webroot="$(moodle_webroot "${moodle_dir}")"
-    echo "${webroot}/admin/cli"
+    find_moodle_admin_cli "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -402,11 +489,26 @@ find_moodle_installations() {
         while IFS= read -r vfile; do
             local mdir
             mdir="$(dirname "${vfile}")"
-            # Check if it looks like Moodle
-            if grep -qE "(\$release|\$version)\s*=" "${vfile}" 2>/dev/null; then
+            # If version.php is in public/, the Moodle root is parent
+            if [[ "$(basename "${mdir}")" == "public" && -d "$(dirname "${mdir}")" ]]; then
+                mdir="$(dirname "${mdir}")"
+            fi
+            if is_moodle_directory "${mdir}"; then
                 found_dirs+=("${mdir}")
             fi
         done < <(find "${base}" -maxdepth 5 -name "version.php" -type f 2>/dev/null)
+
+        # Also find directories with config.php
+        while IFS= read -r cfile; do
+            local cdir
+            cdir="$(dirname "${cfile}")"
+            if [[ "$(basename "${cdir}")" == "public" && -d "$(dirname "${cdir}")" ]]; then
+                cdir="$(dirname "${cdir}")"
+            fi
+            if is_moodle_directory "${cdir}"; then
+                found_dirs+=("${cdir}")
+            fi
+        done < <(find "${base}" -maxdepth 5 -name "config.php" -type f 2>/dev/null)
     done
 
     # Print unique directories

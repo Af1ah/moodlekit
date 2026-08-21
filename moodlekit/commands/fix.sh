@@ -86,7 +86,7 @@ cmd_fix() {
     fi
     
     # If target is a directory path, run standalone doctor
-    if [[ -d "${target}" && -f "${target}/version.php" ]]; then
+    if [[ -d "${target}" ]] && is_moodle_directory "${target}"; then
         _doctor_standalone "${target}"
         return 0
     fi
@@ -529,14 +529,16 @@ _doctor_standalone() {
     init_logging "doctor-standalone"
     section "Moodle Doctor — Standalone Diagnostics: ${moodle_dir}"
     
-    if [[ ! -f "${moodle_dir}/version.php" ]]; then
+    if ! is_moodle_directory "${moodle_dir}"; then
         err "Not a valid Moodle directory: ${moodle_dir}"
         return 1
     fi
     
-    local release
-    release="$(grep -E '^\$release\s*=' "${moodle_dir}/version.php" 2>/dev/null | head -1 | cut -d"'" -f2 || echo "Unknown Moodle")"
-    info "Found: ${release} at ${moodle_dir}"
+    local release cfg_file admin_cli
+    release="$(detect_moodle_version_string "${moodle_dir}")"
+    cfg_file="$(find_moodle_config_file "${moodle_dir}")"
+    admin_cli="$(find_moodle_admin_cli "${moodle_dir}")"
+    info "Found: Moodle ${release} at ${moodle_dir}"
     
     local action=""
     select_one action "Select action for standalone site:" \
@@ -552,10 +554,13 @@ _doctor_standalone() {
             chown -R root:www-data "${moodle_dir}"
             find "${moodle_dir}" -type d -exec chmod 755 {} +
             find "${moodle_dir}" -type f -exec chmod 644 {} +
-            [[ -f "${moodle_dir}/config.php" ]] && chmod 640 "${moodle_dir}/config.php"
+            [[ -n "${cfg_file}" && -f "${cfg_file}" ]] && chmod 640 "${cfg_file}"
             
             local dataroot=""
-            dataroot="$(grep -E "^\s*\\\$CFG->dataroot\s*=" "${moodle_dir}/config.php" 2>/dev/null | cut -d"'" -f2 || true)"
+            if [[ -n "${cfg_file}" && -f "${cfg_file}" ]]; then
+                dataroot="$(grep -E "^\s*\\\$CFG->dataroot\s*=" "${cfg_file}" 2>/dev/null | cut -d"'" -f2 || true)"
+                [[ -z "${dataroot}" ]] && dataroot="$(grep -E '^\s*\$CFG->dataroot\s*=' "${cfg_file}" 2>/dev/null | cut -d'"' -f2 || true)"
+            fi
             if [[ -n "${dataroot}" && -d "${dataroot}" ]]; then
                 for sd in "cache" "localcache" "sessions" "temp" "trashdir" "filedir" "muc" "lock"; do
                     mkdir -p "${dataroot}/${sd}"
@@ -564,8 +569,6 @@ _doctor_standalone() {
                 chmod -R 02777 "${dataroot}" 2>/dev/null || chmod -R 2770 "${dataroot}"
             fi
             
-            local admin_cli="${moodle_dir}/admin/cli"
-            [[ -d "${moodle_dir}/public/admin/cli" ]] && admin_cli="${moodle_dir}/public/admin/cli"
             local php_bin
             php_bin="$(command -v php8.4 || command -v php8.3 || command -v php || echo "")"
             if [[ -n "${php_bin}" && -f "${admin_cli}/purge_caches.php" ]]; then
@@ -577,17 +580,17 @@ _doctor_standalone() {
             chown -R root:www-data "${moodle_dir}"
             find "${moodle_dir}" -type d -exec chmod 755 {} +
             find "${moodle_dir}" -type f -exec chmod 644 {} +
-            [[ -f "${moodle_dir}/config.php" ]] && chmod 640 "${moodle_dir}/config.php"
+            [[ -n "${cfg_file}" && -f "${cfg_file}" ]] && chmod 640 "${cfg_file}"
             ok "Permissions set"
             ;;
         *"Purge Moodle Caches"*)
-            local admin_cli="${moodle_dir}/admin/cli"
-            [[ -d "${moodle_dir}/public/admin/cli" ]] && admin_cli="${moodle_dir}/public/admin/cli"
             local php_bin
             php_bin="$(command -v php8.4 || command -v php8.3 || command -v php || echo "")"
             if [[ -n "${php_bin}" && -f "${admin_cli}/purge_caches.php" ]]; then
-                sudo -u www-data "${php_bin}" "${admin_cli}/purge_caches.php" >/dev/null 2>&1 || true
+                sudo -u www-data "${php_bin}" "${admin_cli}/purge_caches.php"
                 ok "Caches purged"
+            else
+                warn "purge_caches.php not found or PHP CLI unavailable"
             fi
             ;;
         *"Adopt Site"*)
@@ -672,22 +675,28 @@ cmd_adopt() {
     fi
     
     [[ -d "${path}" ]] || { err "Directory not found: ${path}"; return 1; }
-    [[ -f "${path}/version.php" ]] || { err "No version.php found in ${path}. Not a Moodle installation."; return 1; }
-    [[ -f "${path}/config.php" ]] || { err "No config.php found in ${path}. Site might not be installed."; return 1; }
+    if ! is_moodle_directory "${path}"; then
+        err "No Moodle installation recognized in ${path}."
+        return 1
+    fi
+    
+    local cfg_file
+    cfg_file="$(find_moodle_config_file "${path}")"
+    [[ -z "${cfg_file}" || ! -f "${cfg_file}" ]] && { err "No config.php found in ${path} (or ${path}/public). Site might not be configured."; return 1; }
     
     # Parse config.php
     local cfg_wwwroot cfg_dataroot cfg_dbtype cfg_dbname cfg_dbuser cfg_dbpass cfg_prefix
-    cfg_wwwroot="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    [[ -z "${cfg_wwwroot}" ]] && cfg_wwwroot="$(grep -E '^\s*\$CFG->wwwroot\s*=' "${path}/config.php" | cut -d'"' -f2 || true)"
+    cfg_wwwroot="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    [[ -z "${cfg_wwwroot}" ]] && cfg_wwwroot="$(grep -E '^\s*\$CFG->wwwroot\s*=' "${cfg_file}" | cut -d'"' -f2 || true)"
     
-    cfg_dataroot="$(grep -E "^\s*\\\$CFG->dataroot\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    [[ -z "${cfg_dataroot}" ]] && cfg_dataroot="$(grep -E '^\s*\$CFG->dataroot\s*=' "${path}/config.php" | cut -d'"' -f2 || true)"
+    cfg_dataroot="$(grep -E "^\s*\\\$CFG->dataroot\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    [[ -z "${cfg_dataroot}" ]] && cfg_dataroot="$(grep -E '^\s*\$CFG->dataroot\s*=' "${cfg_file}" | cut -d'"' -f2 || true)"
     
-    cfg_dbtype="$(grep -E "^\s*\\\$CFG->dbtype\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    cfg_dbname="$(grep -E "^\s*\\\$CFG->dbname\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    cfg_dbuser="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    cfg_dbpass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${path}/config.php" | cut -d"'" -f2 || true)"
-    cfg_prefix="$(grep -E "^\s*\\\$CFG->prefix\s*=" "${path}/config.php" | cut -d"'" -f2 || echo "mdl_")"
+    cfg_dbtype="$(grep -E "^\s*\\\$CFG->dbtype\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    cfg_dbname="$(grep -E "^\s*\\\$CFG->dbname\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    cfg_dbuser="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    cfg_dbpass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${cfg_file}" | cut -d"'" -f2 || true)"
+    cfg_prefix="$(grep -E "^\s*\\\$CFG->prefix\s*=" "${cfg_file}" | cut -d"'" -f2 || echo "mdl_")"
     
     local domain
     domain="$(echo "${cfg_wwwroot}" | sed -E 's|https?://||; s|/.*||')"
@@ -699,13 +708,10 @@ cmd_adopt() {
         input_text slug "Enter a slug identifier for this site" "${default_slug}" '^[a-z0-9-]+$' "Lowercase alphanumeric/hyphens only"
     fi
     
-    # Detect major version
-    local major_ver="4.5"
-    if [[ -f "${path}/version.php" ]]; then
-        major_ver="$(grep -E '^\$release\s*=' "${path}/version.php" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "4.5")"
-    fi
-    local is_m5=0
-    [[ "${major_ver}" == 5* || -d "${path}/public" ]] && is_m5=1
+    # Detect major version & structure
+    local major_ver is_m5
+    major_ver="$(detect_moodle_version_string "${path}")"
+    is_m5="$(detect_is_moodle5 "${path}")"
     
     # Detect PHP version
     local php_ver="${PHP_VERSION:-8.3}"

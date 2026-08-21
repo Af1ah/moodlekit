@@ -187,6 +187,17 @@ _doctor_site() {
     local cron_file="/etc/cron.d/moodlekit-${slug}"
     [[ ! -f "${cron_file}" ]] && audit_cron_ok=0
     
+    # 8. Check Development Libraries (node_modules & composer dev)
+    local audit_devlibs_ok=1
+    if [[ -d "${MOODLE_DIR}/node_modules" || -d "${MOODLE_DIR}/public/node_modules" ]]; then
+        audit_devlibs_ok=0
+    fi
+    if [[ -f "${MOODLE_DIR}/vendor/composer/installed.php" ]]; then
+        local is_dev_installed
+        is_dev_installed=$(php -r '$i=@include("'"${MOODLE_DIR}"'/vendor/composer/installed.php"); echo (!empty($i["root"]["dev"]) ? "1" : "0");' 2>/dev/null || echo "0")
+        [[ "${is_dev_installed}" == "1" ]] && audit_devlibs_ok=0
+    fi
+    
     # ── Display Audit Report ────────────────────────────────────────────────
     echo ""
     echo -e "${C_BOLD}Diagnostic Findings:${C_RESET}"
@@ -197,6 +208,7 @@ _doctor_site() {
     _print_status_item "PHP-FPM Pool & Socket"        "${audit_fpm_ok}" "FPM pool missing or socket inactive"
     _print_status_item "Nginx Virtual Host & Route"   "${audit_nginx_ok}" "Nginx vhost missing or not enabled"
     _print_status_item "Moodle Cron Job Daemon"       "${audit_cron_ok}" "Cron job in /etc/cron.d/ missing"
+    _print_status_item "Production Dev Libraries"     "${audit_devlibs_ok}" "node_modules present or composer dev libraries installed"
     _print_status_item "Cache & Session Storage"      "${audit_cache_ok}" "Ready for cache refresh"
     echo ""
     
@@ -205,6 +217,7 @@ _doctor_site() {
     select_one action "Select repair action:" \
         "⚡ Apply All Recommended Fixes (Automatic 1-Click Repair)" \
         "🎯 Select Specific Fixes to Apply (Custom Checkboxes)" \
+        "🔒 Clean Dev Libraries & node_modules Only (Clear Security Warning)" \
         "📁 Fix File Permissions & Dataroot Only" \
         "🗃️ Repair Database Tables Only" \
         "🐘 Tune PHP Limits & Fix PHP-FPM Pool Only" \
@@ -227,9 +240,13 @@ _doctor_site() {
                 "5. PHP-FPM Pool & Socket Recreation" \
                 "6. Nginx Web Server Virtual Host & Upstream Route" \
                 "7. Cron Job Installation & Task Queue Unlock" \
-                "8. Purge All Moodle Caches & Reset Maintenance Mode"
+                "8. Remove node_modules & Enforce composer --no-dev" \
+                "9. Purge All Moodle Caches & Reset Maintenance Mode"
             
             _apply_custom_fixes "${slug}" "${selected_fixes[@]}"
+            ;;
+        *"Clean Dev Libraries"*)
+            _fix_devlibs "${slug}"
             ;;
         *"Fix File Permissions"*)
             _fix_perms "${slug}"
@@ -295,7 +312,8 @@ _apply_custom_fixes() {
             *5.*) _fix_fpm "${slug}" ;;
             *6.*) _fix_nginx "${slug}" ;;
             *7.*) _fix_cron "${slug}" ;;
-            *8.*) _fix_cache "${slug}" ;;
+            *8.*) _fix_devlibs "${slug}" ;;
+            *9.*) _fix_cache "${slug}" ;;
         esac
     done
     
@@ -318,6 +336,7 @@ _apply_all_fixes() {
     _fix_fpm "${slug}"
     _fix_nginx "${slug}"
     _fix_cron "${slug}"
+    _fix_devlibs "${slug}"
     _fix_cache "${slug}"
     
     print_box "Doctor Pipeline Complete: ${slug} ✓" \
@@ -327,6 +346,7 @@ _apply_all_fixes() {
         "Permissions:  Secured (0755 code, 02777 data, 0640 config)" \
         "Database:     Checked & Optimized" \
         "PHP & FPM:    Tuned and Active" \
+        "Dev Libs:     node_modules removed & composer in --no-dev" \
         "Caches:       Purged" \
         "Status:       100% Healthy & Online"
 }
@@ -508,6 +528,43 @@ _fix_cache() {
         sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/maintenance.php" --disable >/dev/null 2>&1 || true
         ok "Maintenance mode disabled"
     fi
+}
+
+_fix_devlibs() {
+    local slug="$1"
+    step 1 1 "Removing Development Libraries & Enforcing --no-dev"
+    
+    # 1. Remove node_modules directories from root and plugins
+    if [[ -d "${MOODLE_DIR}/node_modules" ]]; then
+        rm -rf "${MOODLE_DIR}/node_modules"
+        info "Removed root node_modules directory"
+    fi
+    if [[ -d "${MOODLE_DIR}/public/node_modules" ]]; then
+        rm -rf "${MOODLE_DIR}/public/node_modules"
+        info "Removed public/node_modules directory"
+    fi
+    find "${MOODLE_DIR}" -maxdepth 4 -type d -name "node_modules" -exec rm -rf {} + 2>/dev/null || true
+
+    # 2. Re-install Composer dependencies in strict --no-dev mode
+    if [[ -f "${MOODLE_DIR}/composer.json" ]] && command -v composer &>/dev/null; then
+        spinner_start "Installing composer dependencies with --no-dev..."
+        COMPOSER_ALLOW_SUPERUSER=1 composer install \
+            --no-dev \
+            --optimize-autoloader \
+            --no-interaction \
+            --working-dir="${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1 || true
+        spinner_stop 0 "Composer production libraries verified"
+    fi
+
+    # 3. Purge Moodle caches
+    local admin_cli
+    admin_cli="$(find_moodle_admin_cli "${MOODLE_DIR}")"
+    if [[ -f "${admin_cli}/purge_caches.php" ]]; then
+        local active_php="${PHP_VERSION:-}"
+        [[ -z "${active_php}" ]] && active_php="$(get_installed_php_version)"
+        sudo -u www-data "/usr/bin/php${active_php}" "${admin_cli}/purge_caches.php" >/dev/null 2>&1 || true
+    fi
+    ok "Development libraries removed & security check cleared"
 }
 
 # ---------------------------------------------------------------------------

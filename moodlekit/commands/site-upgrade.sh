@@ -182,13 +182,17 @@ cmd_site_upgrade() {
         rm -f "${tmp_config}"
     fi
     
-    # Run composer install if composer.json exists
+    # Remove development node_modules directories from production deployment
+    rm -rf "${MOODLE_DIR}/node_modules" "${MOODLE_DIR}/public/node_modules"
+    find "${MOODLE_DIR}" -maxdepth 4 -type d -name "node_modules" -exec rm -rf {} + 2>/dev/null || true
+
+    # Run composer install if composer.json exists (strictly --no-dev)
     if [[ -f "${MOODLE_DIR}/composer.json" ]] && command -v composer &>/dev/null; then
-        spinner_start "Running composer install..."
+        spinner_start "Running composer install (--no-dev)..."
         COMPOSER_ALLOW_SUPERUSER=1 composer install \
             --no-dev --optimize-autoloader --no-interaction \
             --working-dir="${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1 || true
-        spinner_stop 0 "Composer dependencies installed"
+        spinner_stop 0 "Composer production dependencies installed"
     fi
     
     # ── Step 4: Permissions ──────────────────────────────────────────────────

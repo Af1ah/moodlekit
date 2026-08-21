@@ -455,6 +455,62 @@ load_site_conf() {
         source "${conf}"
         return 0
     fi
+
+    # Auto-resolve unmanaged/standalone on-disk installations
+    local mdir=""
+    if [[ -d "/var/www/moodle/${slug}" ]] && is_moodle_directory "/var/www/moodle/${slug}"; then
+        mdir="/var/www/moodle/${slug}"
+    elif [[ -d "/var/www/${slug}" ]] && is_moodle_directory "/var/www/${slug}"; then
+        mdir="/var/www/${slug}"
+    elif [[ -d "${slug}" ]] && is_moodle_directory "${slug}"; then
+        mdir="${slug}"
+    fi
+
+    if [[ -n "${mdir}" ]]; then
+        local cfg_file
+        cfg_file="$(find_moodle_config_file "${mdir}")"
+        if [[ -n "${cfg_file}" && -f "${cfg_file}" ]]; then
+            local cfg_wwwroot cfg_dataroot cfg_dbtype cfg_dbname cfg_dbuser cfg_dbpass cfg_prefix
+            cfg_wwwroot="$(grep -E "^\s*\\\$CFG->wwwroot\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_wwwroot}" ]] && cfg_wwwroot="$(grep -E '^\s*\$CFG->wwwroot\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+
+            cfg_dataroot="$(grep -E "^\s*\\\$CFG->dataroot\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_dataroot}" ]] && cfg_dataroot="$(grep -E '^\s*\$CFG->dataroot\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+
+            cfg_dbtype="$(grep -E "^\s*\\\$CFG->dbtype\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_dbtype}" ]] && cfg_dbtype="$(grep -E '^\s*\$CFG->dbtype\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || echo "mariadb")"
+
+            cfg_dbname="$(grep -E "^\s*\\\$CFG->dbname\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_dbname}" ]] && cfg_dbname="$(grep -E '^\s*\$CFG->dbname\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+
+            cfg_dbuser="$(grep -E "^\s*\\\$CFG->dbuser\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_dbuser}" ]] && cfg_dbuser="$(grep -E '^\s*\$CFG->dbuser\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+
+            cfg_dbpass="$(grep -E "^\s*\\\$CFG->dbpass\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || true)"
+            [[ -z "${cfg_dbpass}" ]] && cfg_dbpass="$(grep -E '^\s*\$CFG->dbpass\s*=' "${cfg_file}" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+
+            cfg_prefix="$(grep -E "^\s*\\\$CFG->prefix\s*=" "${cfg_file}" 2>/dev/null | head -1 | cut -d"'" -f2 || echo "mdl_")"
+
+            export SLUG="${slug}"
+            export DOMAIN="$(echo "${cfg_wwwroot}" | sed -E 's|https?://||; s|/.*||')"
+            [[ -z "${DOMAIN}" ]] && export DOMAIN="${slug}"
+            export MOODLE_DIR="${mdir}"
+            export MOODLEDATA_DIR="${cfg_dataroot:-/var/moodledata/${slug}}"
+            export DB_TYPE="${cfg_dbtype:-mariadb}"
+            export DB_NAME="${cfg_dbname}"
+            export DB_USER="${cfg_dbuser}"
+            export DB_PASS="${cfg_dbpass}"
+            export DB_PREFIX="${cfg_prefix:-mdl_}"
+            export PHP_VERSION="${PHP_VERSION:-8.4}"
+            export MOODLE_VERSION="$(detect_moodle_version_string "${mdir}")"
+            export IS_MOODLE5="$(detect_is_moodle5 "${mdir}")"
+            export SITE_TYPE="standalone"
+            export NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
+            export FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
+            return 0
+        fi
+    fi
+
     if [[ "${required}" == "1" ]]; then
         err "Site config not found for '${slug}' in encrypted vault or ${conf}"
         local avail
@@ -466,19 +522,26 @@ load_site_conf() {
 }
 
 list_site_slugs() {
+    local -a slugs=()
     if type vault_slist &>/dev/null; then
-        vault_slist
-    else
-        find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null \
-            | sed 's|.*/||; s|\.conf$||' | sort
+        mapfile -t slugs < <(vault_slist 2>/dev/null)
+    fi
+    if [[ -d "${MOODLEKIT_SITES_DIR}" ]]; then
+        while IFS= read -r f; do
+            [[ -n "${f}" ]] && slugs+=("$(basename "${f}" .conf)")
+        done < <(find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null)
+    fi
+    while IFS= read -r udir; do
+        [[ -n "${udir}" ]] && slugs+=("$(basename "${udir}")")
+    done < <(find_moodle_installations 2>/dev/null)
+
+    if [[ ${#slugs[@]} -gt 0 ]]; then
+        printf '%s\n' "${slugs[@]}" | sort -u
     fi
 }
 
 list_removable_slugs() {
-    {
-        list_site_slugs
-        find "/var/www/moodle" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sed 's|.*/||'
-    } | sort -u
+    list_site_slugs
 }
 
 site_exists() {
@@ -486,7 +549,19 @@ site_exists() {
     if type vault_site_exists &>/dev/null && vault_site_exists "${slug}"; then
         return 0
     fi
-    [[ -f "${MOODLEKIT_SITES_DIR}/${slug}.conf" ]]
+    if [[ -f "${MOODLEKIT_SITES_DIR}/${slug}.conf" ]]; then
+        return 0
+    fi
+    if [[ -d "/var/www/moodle/${slug}" ]] && is_moodle_directory "/var/www/moodle/${slug}"; then
+        return 0
+    fi
+    if [[ -d "/var/www/${slug}" ]] && is_moodle_directory "/var/www/${slug}"; then
+        return 0
+    fi
+    if [[ -d "${slug}" ]] && is_moodle_directory "${slug}"; then
+        return 0
+    fi
+    return 1
 }
 
 # ---------------------------------------------------------------------------

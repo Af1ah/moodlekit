@@ -9,6 +9,7 @@
 [[ -n "${_MOODLEKIT_VAULT_LOADED:-}" ]] && return 0
 _MOODLEKIT_VAULT_LOADED=1
 
+MOODLEKIT_LIB="${MOODLEKIT_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 MOODLEKIT_VAULT_PY="${MOODLEKIT_LIB}/vault.py"
 MOODLEKIT_VAULT_FILE="${MOODLEKIT_VAULT_PATH:-/etc/moodlekit/vault.bin}"
 MOODLEKIT_KEY_FILE="${MOODLEKIT_KEY_PATH:-/etc/moodlekit/.master.key}"

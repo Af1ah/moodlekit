@@ -1,0 +1,80 @@
+# =============================================================================
+# MoodleKit — Shared Core Infrastructure Compose Definition
+# Services: Caddy (Edge / TLS), MariaDB (Shared DB), Redis (MUC / Sessions)
+# =============================================================================
+name: moodlekit
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: moodle-caddy
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-admin@localhost}
+    volumes:
+      - ./conf/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./conf/caddy/moodle_common.caddy:/etc/caddy/moodle_common.caddy:ro
+      - ./conf/caddy/sites.d:/etc/caddy/sites.d:ro
+      - ../data/caddy/data:/data
+      - ../data/caddy/config:/config
+      # Mount sites directory for static asset fast serving & internal X-Accel-Redirect
+      - ../sites:/var/www/html:ro
+      - ../sites:/var/moodledata:ro
+    networks:
+      - moodle_net
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: mariadb:11.4
+    container_name: moodle-db
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-file-per-table=1
+      - --innodb-large-prefix=1
+      - --max-connections=250
+      - --innodb-buffer-pool-size=${DB_BUFFER_POOL_SIZE:-512M}
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-moodle_root_secret}
+      MARIADB_DATABASE: moodle_master
+      MARIADB_USER: moodle_admin
+      MARIADB_PASSWORD: ${DB_ADMIN_PASSWORD:-moodle_admin_secret}
+    volumes:
+      - ./conf/mariadb/my.cnf:/etc/mysql/conf.d/moodle.cnf:ro
+      - ../data/db:/var/lib/mysql
+    networks:
+      - moodle_net
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p${DB_ROOT_PASSWORD:-moodle_root_secret} || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: moodle-redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD:-moodle_redis_secret}"]
+    volumes:
+      - ./conf/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ../data/redis:/data
+    networks:
+      - moodle_net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-moodle_redis_secret} ping | grep PONG || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  moodle_net:
+    name: moodle_net
+    driver: bridge

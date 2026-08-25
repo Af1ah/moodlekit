@@ -1,0 +1,41 @@
+# =============================================================================
+# MoodleKit Git Ignore
+# =============================================================================
+
+# Environment & Credentials
+.env
+.env.*
+!.env.example
+
+# Persistent Databases & Caches
+/data/*
+!/data/.gitkeep
+
+# Live Tenant Sites Code & Moodledata
+/sites/*
+!/sites/.gitkeep
+
+# Backup Archives
+/backups/*
+!/backups/.gitkeep
+
+# Generated Tenant Caddy Routes
+/docker/conf/caddy/sites.d/*
+!/docker/conf/caddy/sites.d/.gitkeep
+
+# Reference & Local Scratch
+.reference/
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & OS Metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

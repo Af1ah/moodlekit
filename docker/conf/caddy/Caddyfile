@@ -1,0 +1,20 @@
+# =============================================================================
+# MoodleKit — Central Multi-Tenant Caddy Configuration
+# =============================================================================
+
+{
+    # Global options
+    email {$LETSENCRYPT_EMAIL:admin@localhost}
+    admin 0.0.0.0:2019
+    
+    # Trust private internal Docker networks
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+# Import common reusable Moodle snippet
+import /etc/caddy/moodle_common.caddy
+
+# Import dynamic per-tenant site definitions
+import /etc/caddy/sites.d/*.caddy

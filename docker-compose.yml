@@ -1,0 +1,9 @@
+# =============================================================================
+# MoodleKit Master Docker Compose
+# Automatically synchronized across all active tenant sites
+# =============================================================================
+name: moodlekit
+
+include:
+  - docker/compose.core.yml
+  - sites/lms2/compose.yml

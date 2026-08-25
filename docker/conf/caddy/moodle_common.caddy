@@ -1,0 +1,67 @@
+# =============================================================================
+# MoodleKit — Shared Moodle Caddy Snippet & Security Rules
+# =============================================================================
+
+(moodle_security_headers) {
+    header {
+        # Modern Security Headers
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+}
+
+(moodle_site) {
+    # Parameters:
+    # {args[0]} -> PHP-FPM Upstream (e.g. moodle-app-mysite:9000)
+    # {args[1]} -> Caddy Root Path (e.g. /var/www/html/mysite/code/public)
+    # {args[2]} -> Container Document Root (e.g. /var/www/html/public or /var/www/html)
+    
+    root * {args[1]}
+    encode zstd gzip
+
+    # Apply hardened security headers
+    import moodle_security_headers
+
+    # -------------------------------------------------------------------------
+    # Security: Deny direct access to sensitive paths, moodledata, tests & dotfiles
+    # Compliant with official Moodle core_publicpaths security audit
+    # -------------------------------------------------------------------------
+    @forbidden {
+        path */.* /dataroot/* /moodledata/* /vendor/* /node_modules/*
+        path *composer.* *package*.json *yarn.lock *install.xml *upgrade*.txt *UPGRADING* *readme*.txt *README* *environment.xml *CHANGELOG* *phpunit* *behat* *Gruntfile* *config.php
+        path */fixtures/* */behat/* */tests/*
+    }
+    error @forbidden 404
+
+    # -------------------------------------------------------------------------
+    # FastCGI PHP-FPM Handler with slasharguments / PATH_INFO support
+    # -------------------------------------------------------------------------
+    php_fastcgi {args[0]} {
+        root {args[2]}
+        split .php
+        index index.php
+        
+        # Moodle 5.x router fallback (r.php) or Moodle 4.x standard fallback
+        try_files {path} {path}/index.php /r.php /index.php
+
+        read_timeout 300s
+        dial_timeout 10s
+    }
+
+    # Serve static assets (CSS, JS, images, fonts)
+    file_server
+
+    # -------------------------------------------------------------------------
+    # Graceful Overload & Maintenance Handler (502 / 503 / 504)
+    # -------------------------------------------------------------------------
+    handle_errors {
+        @server_errors `{err.status_code} in [502, 503, 504]`
+        header @server_errors Retry-After "5"
+        header @server_errors Content-Type "text/html; charset=utf-8"
+        respond @server_errors "<html><head><title>System Busy</title><meta http-equiv='refresh' content='5'><style>body{font-family:system-ui,-apple-system,sans-serif;background:#f8f9fa;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;color:#212529;} .box{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.08);text-align:center;max-width:480px;} h1{color:#0d6efd;font-size:1.8rem;margin-bottom:0.5rem;} p{color:#6c757d;line-height:1.6;} .spinner{width:40px;height:40px;border:4px solid #e9ecef;border-top-color:#0d6efd;border-radius:50%;animation:spin 1s linear infinite;margin:1.5rem auto;} @keyframes spin{to{transform:rotate(360deg);}}</style></head><body><div class='box'><div class='spinner'></div><h1>System is Busy</h1><p>High traffic volume detected. Your request is queued and will automatically retry in a few seconds...</p></div></body></html>" {err.status_code}
+    }
+}

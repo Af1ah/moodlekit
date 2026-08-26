@@ -443,6 +443,21 @@ class PostgresDriver(BaseDBDriver):
         ]
         return run_cmd(cmd, capture=True)
 
+    def grant_tenant_permissions(self, db_name: str, db_user: str) -> None:
+        perm_sql = f"""
+        GRANT ALL ON SCHEMA public TO "{db_user}";
+        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "{db_user}";
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{db_user}";
+        GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO "{db_user}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{db_user}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "{db_user}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO "{db_user}";
+        """
+        try:
+            self.exec_query(perm_sql, db=db_name)
+        except Exception:
+            pass
+
     def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
         self.ensure_running()
         role_sql = f"""
@@ -461,6 +476,7 @@ class PostgresDriver(BaseDBDriver):
         if "1" not in check_db.stdout:
             self.exec_query(f'CREATE DATABASE "{db_name}" WITH OWNER "{db_user}" ENCODING \'UTF8\';')
         self.exec_query(f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}";')
+        self.grant_tenant_permissions(db_name, db_user)
 
     def dump_database(self, source_config: Dict[str, Any], output_file: Path) -> None:
         shost = source_config.get("dbhost", "localhost")
@@ -521,6 +537,8 @@ class PostgresDriver(BaseDBDriver):
         ]
         with open(dump_file, "r") as f:
             subprocess.run(import_cmd, stdin=f, check=True)
+        clean_user = f"moodle_{slug.replace('-', '_')}"
+        self.grant_tenant_permissions(db_name, clean_user)
 
 
 def get_db_driver(db_type: str, env: Dict[str, str]) -> BaseDBDriver:

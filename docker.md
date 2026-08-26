@@ -238,6 +238,49 @@ Captures the SQL database, Moodle codebase, and `moodledata` (filtering out tran
 
 ---
 
+### C. Adopting Existing Moodle Instances (LAMP, LEMP, Bare-Metal, or Docker)
+
+The `site adopt` command seamlessly migrates an existing Moodle installation into MoodleKit with automated database driver detection (**PostgreSQL** or **MariaDB/MySQL**), codebase preservation (all custom plugins/themes intact), sanitized moodledata migration, domain search-and-replace, and zero host port conflicts:
+
+```bash
+# 1. Basic Adoption (Auto-extracts DB credentials, dataroot, and domain from config.php):
+./moodlekit-docker.py site adopt legacy_school \
+  --source-code /var/www/html/moodle \
+  --plan big
+
+# 2. Adopt with Domain Change & PostgreSQL Engine:
+./moodlekit-docker.py site adopt pg_lms \
+  --source-code /opt/moodle \
+  --db-type pgsql \
+  --domain newdomain.example.com \
+  --plan enterprise
+
+# 3. Adopt with Direct Volume Mount for Huge Moodledata (Zero Copy Time):
+./moodlekit-docker.py site adopt massive_lms \
+  --source-code /var/www/moodle \
+  --source-data /mnt/faststorage/moodledata \
+  --link-data \
+  --plan enterprise
+
+# 4. Adopt with Pre-dumped Database File:
+./moodlekit-docker.py site adopt legacy_site \
+  --source-code /var/www/moodle \
+  --db-dump /backups/moodle_backup.sql \
+  --domain school.example.com
+```
+
+#### What `site adopt` Automates:
+1. **Config Analysis**: Auto-parses `config.php` for database engine (`pgsql` vs `mariadb`), table prefix (`mdl_`), dataroot, and domain.
+2. **Database Migration**: Dumps source database (or imports provided `.sql` dump) into an isolated MoodleKit database container (`db` or `postgres`).
+3. **Zero Host Conflict**: Internal database services remain unexposed to the host network (internal `moodle_net` only), allowing co-existence with any host PostgreSQL or MySQL services.
+4. **Codebase Preservation**: Retains all custom plugins, blocks, themes, and modifications.
+5. **Dataroot Migration or Linking**: Migrates moodledata (skipping ephemeral `cache`, `sessions`, `localcache`, `temp`) OR volume-mounts the existing path directly (`--link-data`).
+6. **Hardened Configuration**: Injects Redis session storage, `$CFG->preventexecpath = true`, `$CFG->xsendfile = 'X-Accel-Redirect'`, and `02775`/`0664` permissions.
+7. **Automated Search-and-Replace**: When the domain changes, automatically executes Moodle core CLI `admin/tool/replace/cli/replace.php` to update all internal URLs in the database.
+8. **Cache Purge & Sizing**: Purges Moodle caches and hot-configures the chosen sizing profile (`small`, `medium`, `big`, `enterprise`).
+
+---
+
 ## 8. Plugin Management (Web UI & CLI)
 
 ### Method 1: Web Interface
@@ -356,6 +399,7 @@ docker exec moodle-app-lms2 php /var/www/html/admin/cli/check_database_schema.ph
 # ── Tenant Operations ──────────────────────────────────────────────────────
 ./moodlekit-docker.py site plans                # List sizing profiles (small, medium, big, enterprise)
 ./moodlekit-docker.py site create <slug>        # Create a new tenant site
+./moodlekit-docker.py site adopt <slug>         # Adopt existing Moodle (PostgreSQL / MariaDB)
 ./moodlekit-docker.py site resize <slug> --plan # Hot-scale tenant capacity with 0 downtime
 ./moodlekit-docker.py site list                 # List all tenants
 ./moodlekit-docker.py site fix-perms <slug>     # Enforce strict Moodle security permissions

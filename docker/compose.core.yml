@@ -1,6 +1,6 @@
 # =============================================================================
 # MoodleKit — Shared Core Infrastructure Compose Definition
-# Services: Caddy (Edge / TLS), MariaDB (Shared DB), Redis (MUC / Sessions)
+# Services: Caddy (Edge / TLS), MariaDB (MySQL DB), PostgreSQL (PgSQL DB), Redis
 # =============================================================================
 name: moodlekit
 
@@ -53,6 +53,25 @@ services:
       - moodle_net
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p${DB_ROOT_PASSWORD:-moodle_root_secret} || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: moodle-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moodle_pg_secret}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: moodle_master
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    networks:
+      - moodle_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10

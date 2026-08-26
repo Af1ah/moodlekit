@@ -98,6 +98,17 @@ def run_cmd(
     )
 
 
+def safe_rmtree(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except PermissionError:
+        parent = path.parent.resolve()
+        name = path.name
+        run_cmd(["docker", "run", "--rm", "-v", f"{parent}:/work", "alpine", "rm", "-rf", f"/work/{name}"], check=False)
+
+
 def load_env() -> Dict[str, str]:
     env_vars = {}
     if ENV_FILE.exists():
@@ -203,6 +214,12 @@ def ensure_core_env() -> Dict[str, str]:
     if "DB_ADMIN_PASSWORD" not in env:
         env["DB_ADMIN_PASSWORD"] = gen_password(24)
         updated = True
+    if "POSTGRES_PASSWORD" not in env:
+        env["POSTGRES_PASSWORD"] = gen_password(24)
+        updated = True
+    if "POSTGRES_USER" not in env:
+        env["POSTGRES_USER"] = "postgres"
+        updated = True
     if "REDIS_PASSWORD" not in env:
         env["REDIS_PASSWORD"] = gen_password(24)
         updated = True
@@ -281,27 +298,262 @@ def reload_caddy() -> bool:
     return False
 
 
+# =============================================================================
+# Database Driver Abstraction (MariaDB & PostgreSQL)
+# =============================================================================
+
+class BaseDBDriver:
+    def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
+        raise NotImplementedError
+
+    def dump_database(self, source_config: Dict[str, Any], output_file: Path) -> None:
+        raise NotImplementedError
+
+    def restore_database(self, slug: str, db_name: str, dump_file: Path) -> None:
+        raise NotImplementedError
+
+    def exec_query(self, query: str) -> subprocess.CompletedProcess:
+        raise NotImplementedError
+
+
+class MariaDBDriver(BaseDBDriver):
+    def __init__(self, env: Dict[str, str]):
+        self.env = env
+        self.root_pass = env.get("DB_ROOT_PASSWORD", "moodle_root_secret")
+        self.host = "db"
+        self.port = 3306
+        self.db_type = "mariadb"
+
+    def exec_query(self, query: str) -> subprocess.CompletedProcess:
+        cmd = [
+            "docker", "compose",
+            "-f", str(DOCKER_DIR / "compose.core.yml"),
+            "--env-file", str(ENV_FILE),
+            "exec", "-T", "db",
+            "mariadb",
+            "--skip-ssl",
+            "-u", "root",
+            f"-p{self.root_pass}",
+            "-e", query,
+        ]
+        return run_cmd(cmd, capture=True)
+
+    def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
+        sql = f"""
+        CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}';
+        GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%';
+        FLUSH PRIVILEGES;
+        """
+        self.exec_query(sql)
+
+    def dump_database(self, source_config: Dict[str, Any], output_file: Path) -> None:
+        shost = source_config.get("dbhost", "localhost")
+        sport = str(source_config.get("dbport", "3306"))
+        suser = source_config.get("dbuser", "root")
+        spass = source_config.get("dbpass", "")
+        sdb = source_config.get("dbname", "")
+
+        if shost in ["db", "127.0.0.1", "localhost"]:
+            dump_cmd = [
+                "docker", "compose",
+                "-f", str(DOCKER_DIR / "compose.core.yml"),
+                "--env-file", str(ENV_FILE),
+                "exec", "-T", "db",
+                "mariadb-dump",
+                "--skip-ssl",
+                "-u", suser,
+            ]
+            if spass:
+                dump_cmd.append(f"-p{spass}")
+            dump_cmd.extend(["--single-transaction", "--quick", "--max_allowed_packet=512M", sdb])
+            with open(output_file, "w") as f:
+                subprocess.run(dump_cmd, stdout=f, check=True)
+        else:
+            dump_cmd = ["mariadb-dump", "--skip-ssl", "-h", shost, "-P", sport, "-u", suser]
+            if spass:
+                dump_cmd.append(f"-p{spass}")
+            dump_cmd.extend(["--single-transaction", "--quick", "--max_allowed_packet=512M", sdb])
+            with open(output_file, "w") as f:
+                subprocess.run(dump_cmd, stdout=f, check=True)
+
+    def restore_database(self, slug: str, db_name: str, dump_file: Path) -> None:
+        import_cmd = [
+            "docker", "compose",
+            "-f", str(DOCKER_DIR / "compose.core.yml"),
+            "--env-file", str(ENV_FILE),
+            "exec", "-T", "db",
+            "mariadb",
+            "--skip-ssl",
+            "-u", "root",
+            f"-p{self.root_pass}",
+            db_name,
+        ]
+        with open(dump_file, "r") as f:
+            subprocess.run(import_cmd, stdin=f, check=True)
+
+
+class PostgresDriver(BaseDBDriver):
+    def __init__(self, env: Dict[str, str]):
+        self.env = env
+        self.pg_pass = env.get("POSTGRES_PASSWORD", "moodle_pg_secret")
+        self.pg_user = env.get("POSTGRES_USER", "postgres")
+        self.host = "postgres"
+        self.port = 5432
+        self.db_type = "pgsql"
+
+    def exec_query(self, query: str, db: str = "postgres") -> subprocess.CompletedProcess:
+        cmd = [
+            "docker", "compose",
+            "-f", str(DOCKER_DIR / "compose.core.yml"),
+            "--env-file", str(ENV_FILE),
+            "exec", "-T",
+            "-e", f"PGPASSWORD={self.pg_pass}",
+            "postgres",
+            "psql",
+            "-U", self.pg_user,
+            "-d", db,
+            "-c", query,
+        ]
+        return run_cmd(cmd, capture=True)
+
+    def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
+        role_sql = f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{db_user}') THEN
+                CREATE ROLE "{db_user}" WITH LOGIN PASSWORD '{db_pass}';
+            ELSE
+                ALTER ROLE "{db_user}" WITH PASSWORD '{db_pass}';
+            END IF;
+        END
+        $$;
+        """
+        self.exec_query(role_sql)
+        check_db = self.exec_query(f"SELECT 1 FROM pg_database WHERE datname='{db_name}'")
+        if "1" not in check_db.stdout:
+            self.exec_query(f'CREATE DATABASE "{db_name}" WITH OWNER "{db_user}" ENCODING \'UTF8\';')
+        self.exec_query(f'GRANT ALL PRIVILEGES ON DATABASE "{db_name}" TO "{db_user}";')
+
+    def dump_database(self, source_config: Dict[str, Any], output_file: Path) -> None:
+        shost = source_config.get("dbhost", "localhost")
+        sport = str(source_config.get("dbport", "5432"))
+        suser = source_config.get("dbuser", "postgres")
+        spass = source_config.get("dbpass", "")
+        sdb = source_config.get("dbname", "")
+
+        if shost in ["postgres", "127.0.0.1", "localhost"]:
+            dump_cmd = [
+                "docker", "compose",
+                "-f", str(DOCKER_DIR / "compose.core.yml"),
+                "--env-file", str(ENV_FILE),
+                "exec", "-T",
+                "-e", f"PGPASSWORD={spass or self.pg_pass}",
+                "postgres",
+                "pg_dump",
+                "-U", suser,
+                "-d", sdb,
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+            ]
+            with open(output_file, "w") as f:
+                subprocess.run(dump_cmd, stdout=f, check=True)
+        else:
+            dump_env = os.environ.copy()
+            if spass:
+                dump_env["PGPASSWORD"] = spass
+            dump_cmd = [
+                "pg_dump",
+                "-h", shost,
+                "-p", sport,
+                "-U", suser,
+                "-d", sdb,
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+            ]
+            with open(output_file, "w") as f:
+                subprocess.run(dump_cmd, stdout=f, check=True, env=dump_env)
+
+    def restore_database(self, slug: str, db_name: str, dump_file: Path) -> None:
+        import_cmd = [
+            "docker", "compose",
+            "-f", str(DOCKER_DIR / "compose.core.yml"),
+            "--env-file", str(ENV_FILE),
+            "exec", "-T",
+            "-e", f"PGPASSWORD={self.pg_pass}",
+            "postgres",
+            "psql",
+            "-U", self.pg_user,
+            "-d", db_name,
+        ]
+        with open(dump_file, "r") as f:
+            subprocess.run(import_cmd, stdin=f, check=True)
+
+
+def get_db_driver(db_type: str, env: Dict[str, str]) -> BaseDBDriver:
+    if db_type.lower() in ["pgsql", "postgres", "postgresql"]:
+        return PostgresDriver(env)
+    return MariaDBDriver(env)
+
+
 def exec_db_query(sql: str) -> subprocess.CompletedProcess:
     env = ensure_core_env()
-    root_pass = env["DB_ROOT_PASSWORD"]
-    cmd = [
-        "docker",
-        "compose",
-        "-f",
-        str(DOCKER_DIR / "compose.core.yml"),
-        "--env-file",
-        str(ENV_FILE),
-        "exec",
-        "-T",
-        "db",
-        "mariadb",
-        "-u",
-        "root",
-        f"-p{root_pass}",
-        "-e",
-        sql,
-    ]
-    return run_cmd(cmd, capture=True)
+    driver = MariaDBDriver(env)
+    return driver.exec_query(sql)
+
+
+def parse_moodle_config_php(config_path: Path) -> Dict[str, Any]:
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.php not found at {config_path}")
+
+    with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+
+    def get_var(name: str, default: str = "") -> str:
+        m = re.search(r"\$CFG->" + re.escape(name) + r"\s*=\s*['\"]([^'\"]*)['\"];", content)
+        if m:
+            return m.group(1).strip()
+        m_num = re.search(r"\$CFG->" + re.escape(name) + r"\s*=\s*([0-9]+);", content)
+        if m_num:
+            return m_num.group(1).strip()
+        return default
+
+    raw_dbtype = get_var("dbtype", "mariadb").lower()
+    if raw_dbtype in ["mysqli", "mysql", "mariadb"]:
+        dbtype = "mariadb"
+    elif raw_dbtype in ["postgres", "postgresql", "pgsql"]:
+        dbtype = "pgsql"
+    else:
+        dbtype = raw_dbtype
+
+    dbhost = get_var("dbhost", "localhost")
+    dbname = get_var("dbname", "")
+    dbuser = get_var("dbuser", "")
+    dbpass = get_var("dbpass", "")
+    prefix = get_var("prefix", "mdl_")
+    wwwroot = get_var("wwwroot", "")
+    dataroot = get_var("dataroot", "")
+
+    dbport = "5432" if dbtype == "pgsql" else "3306"
+    port_match = re.search(r"['\"]dbport['\"]\s*=>\s*['\"]?([0-9]+)['\"]?", content)
+    if port_match:
+        dbport = port_match.group(1)
+
+    return {
+        "dbtype": dbtype,
+        "dbhost": dbhost,
+        "dbport": dbport,
+        "dbname": dbname,
+        "dbuser": dbuser,
+        "dbpass": dbpass,
+        "prefix": prefix,
+        "wwwroot": wwwroot,
+        "dataroot": dataroot,
+    }
 
 
 # =============================================================================
@@ -457,6 +709,14 @@ def render_template(tpl_path: Path, context: Dict[str, Any]) -> str:
         else:
             content = pattern.sub("", content)
 
+    # Inverted section handlers for {{^KEY}}...{{/KEY}}
+    for k, v in context.items():
+        inv_pattern = re.compile(rf"\{{\{{\^\s*{k}\s*\}}\}}(.*?)\{{\{{/\s*{k}\s*\}}\}}", re.DOTALL)
+        if not bool(v):
+            content = inv_pattern.sub(r"\1", content)
+        else:
+            content = inv_pattern.sub("", content)
+
     # Variable replacement {{KEY}}
     for k, v in context.items():
         content = content.replace(f"{{{{{k}}}}}", str(v))
@@ -470,8 +730,8 @@ def get_site_compose_file(slug: str) -> Path:
 
 def cmd_site_create(args: argparse.Namespace) -> None:
     slug = args.slug.lower().strip()
-    if not re.match(r"^[a-z0-9_]+$", slug):
-        err("Site slug must contain only lowercase letters, numbers, and underscores.")
+    if not re.match(r"^[a-z0-9_-]+$", slug):
+        err("Site slug must contain only lowercase letters, numbers, hyphens, and underscores.")
         sys.exit(1)
 
     site_dir = SITES_DIR / slug
@@ -486,8 +746,18 @@ def cmd_site_create(args: argparse.Namespace) -> None:
     env = ensure_core_env()
     domain = getattr(args, "domain", None) or f"{slug}.localhost"
     moodle_version = getattr(args, "moodle_version", None) or "5.2"
-    db_name = f"moodle_{slug}"
-    db_user = f"moodle_{slug}"
+    db_type = getattr(args, "db_type", "mariadb") or "mariadb"
+    if db_type in ["mysqli", "mysql"]:
+        db_type = "mariadb"
+    elif db_type in ["postgres", "postgresql"]:
+        db_type = "pgsql"
+
+    db_driver = get_db_driver(db_type, env)
+    db_host = db_driver.host
+    db_port = str(db_driver.port)
+    clean_slug = slug.replace("-", "_")
+    db_name = f"moodle_{clean_slug}"
+    db_user = f"moodle_{clean_slug}"
     db_pass = getattr(args, "db_pass", None) or gen_password(24)
     admin_user = getattr(args, "admin_user", None) or "admin"
     admin_pass = getattr(args, "admin_pass", None) or "Admin123!#"
@@ -498,18 +768,12 @@ def cmd_site_create(args: argparse.Namespace) -> None:
 
     info(f"Target Domain:       {domain}")
     info(f"Moodle Version:      {moodle_version} ({'Moodle 5.x Router' if is_moodle5 else 'Moodle 4.x Classic'})")
-    info(f"Database:            MariaDB ({db_name})")
+    info(f"Database Engine:     {db_type.upper()} ({db_name} on {db_host}:{db_port})")
     info(f"Redis Sessions:      Enabled (Prefix: {slug}_sess_)")
 
-    # Step 1: Create Database & User on Shared MariaDB
-    info("Provisioning database and user on shared MariaDB...")
-    sql = f"""
-    CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-    CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}';
-    GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%';
-    FLUSH PRIVILEGES;
-    """
-    exec_db_query(sql)
+    # Step 1: Create Database & User
+    info(f"Provisioning database and user on shared {db_type.upper()}...")
+    db_driver.create_database(slug, db_name, db_user, db_pass)
     success("Database and user provisioned.")
 
     # Step 2: Create Site Folders
@@ -533,9 +797,10 @@ def cmd_site_create(args: argparse.Namespace) -> None:
         "SLUG": slug,
         "DOMAIN": domain,
         "WWWROOT": wwwroot,
-        "DB_TYPE": "mariadb",
-        "DB_HOST": "db",
-        "DB_PORT": "3306",
+        "DB_TYPE": db_type,
+        "IS_POSTGRES": db_type == "pgsql",
+        "DB_HOST": db_host,
+        "DB_PORT": db_port,
         "DB_NAME": db_name,
         "DB_USER": db_user,
         "DB_PASS": db_pass,
@@ -587,8 +852,14 @@ def cmd_site_create(args: argparse.Namespace) -> None:
         "DOMAIN": domain,
         "BASE_DIR": str(BASE_DIR),
         "IMAGE_NAME": env.get("MOODLE_IMAGE", "moodlekit/moodle-app:8.3"),
+        "DB_TYPE": db_type,
+        "DB_HOST": db_host,
+        "DB_PORT": db_port,
+        "DB_NAME": db_name,
+        "DB_USER": db_user,
         "DB_PASS": db_pass,
         "REDIS_AUTH": env.get("REDIS_PASSWORD", ""),
+        "MOODLEDATA_PATH": str(moodledata_dir),
         "PLAN_NAME": plan_name,
         "PLAN_DESC": profile["description"],
         "FPM_PM": profile["fpm_pm"],
@@ -658,6 +929,7 @@ def cmd_site_create(args: argparse.Namespace) -> None:
         "wwwroot": wwwroot,
         "moodle_version": moodle_version,
         "is_moodle5": is_moodle5,
+        "db_type": db_type,
         "db_name": db_name,
         "db_user": db_user,
         "db_pass": db_pass,
@@ -756,18 +1028,39 @@ def cmd_site_remove(args: argparse.Namespace) -> None:
         reload_caddy()
 
     # 3. Drop Database and User
-    info("Dropping database and user from MariaDB...")
-    sql = f"""
-    DROP DATABASE IF EXISTS `moodle_{slug}`;
-    DROP USER IF EXISTS 'moodle_{slug}'@'%';
-    FLUSH PRIVILEGES;
-    """
-    exec_db_query(sql)
+    meta_file = site_dir / "meta.json"
+    db_type = "mariadb"
+    if meta_file.exists():
+        try:
+            with open(meta_file, "r") as f:
+                meta = json.load(f)
+                db_type = meta.get("db_type", "mariadb")
+        except Exception:
+            pass
+
+    clean_slug = slug.replace("-", "_")
+    target_db_name = f"moodle_{clean_slug}"
+    target_db_user = f"moodle_{clean_slug}"
+    env = ensure_core_env()
+
+    if db_type == "pgsql":
+        info(f"Dropping database '{target_db_name}' and role '{target_db_user}' from PostgreSQL...")
+        pg_driver = PostgresDriver(env)
+        pg_driver.exec_query(f'DROP DATABASE IF EXISTS "{target_db_name}";')
+        pg_driver.exec_query(f'DROP ROLE IF EXISTS "{target_db_user}";')
+    else:
+        info(f"Dropping database '{target_db_name}' and user '{target_db_user}' from MariaDB...")
+        sql = f"""
+        DROP DATABASE IF EXISTS `{target_db_name}`;
+        DROP USER IF EXISTS '{target_db_user}'@'%';
+        FLUSH PRIVILEGES;
+        """
+        exec_db_query(sql)
 
     # 4. Remove Filesystem unless --keep-data
     if not getattr(args, "keep_data", False):
         info(f"Deleting site directory {site_dir}...")
-        shutil.rmtree(site_dir)
+        safe_rmtree(site_dir)
         success(f"Site '{slug}' completely removed.")
     else:
         success(f"Site '{slug}' containers and DB removed. Data preserved in {site_dir}.")
@@ -883,19 +1176,20 @@ def cmd_site_restore(args: argparse.Namespace) -> None:
         # 1. Restore Code and Moodledata
         if (work_path / "code").exists():
             if code_dir.exists():
-                shutil.rmtree(code_dir)
+                safe_rmtree(code_dir)
             shutil.copytree(work_path / "code", code_dir)
 
         if (work_path / "moodledata").exists():
             if moodledata_dir.exists():
-                shutil.rmtree(moodledata_dir)
+                safe_rmtree(moodledata_dir)
             shutil.copytree(work_path / "moodledata", moodledata_dir)
 
         # 2. Provision Database and Restore SQL Dump
         env = ensure_core_env()
         root_pass = env["DB_ROOT_PASSWORD"]
-        db_name = f"moodle_{slug}"
-        db_user = f"moodle_{slug}"
+        clean_slug = slug.replace("-", "_")
+        db_name = f"moodle_{clean_slug}"
+        db_user = f"moodle_{clean_slug}"
         db_pass = gen_password(24)
 
         info("Re-creating database and user...")
@@ -977,8 +1271,14 @@ def cmd_site_restore(args: argparse.Namespace) -> None:
             "DOMAIN": domain,
             "BASE_DIR": str(BASE_DIR),
             "IMAGE_NAME": env.get("MOODLE_IMAGE", "moodlekit/moodle-app:8.3"),
+            "DB_TYPE": "mariadb",
+            "DB_HOST": "db",
+            "DB_PORT": "3306",
+            "DB_NAME": db_name,
+            "DB_USER": db_user,
             "DB_PASS": db_pass,
             "REDIS_AUTH": env.get("REDIS_PASSWORD", ""),
+            "MOODLEDATA_PATH": str(moodledata_dir),
             "PLAN_NAME": plan_name,
             "PLAN_DESC": profile["description"],
             "FPM_PM": profile["fpm_pm"],
@@ -1002,6 +1302,337 @@ def cmd_site_restore(args: argparse.Namespace) -> None:
         reload_caddy()
 
         success(f"Tenant site '{slug}' successfully restored at {wwwroot}!")
+
+
+def cmd_site_adopt(args: argparse.Namespace) -> None:
+    slug = args.slug.lower().strip()
+    if not re.match(r"^[a-z0-9_-]+$", slug):
+        err("Site slug must contain only lowercase letters, numbers, hyphens, and underscores.")
+        sys.exit(1)
+
+    cprint("=================================================================", C_BLUE, bold=True)
+    cprint(f"      Adopting Existing Moodle Instance into Tenant: '{slug}'     ", C_BLUE, bold=True)
+    cprint("=================================================================", C_BLUE, bold=True)
+
+    # 1. Validate Source Code Path
+    source_code = Path(args.source_code).resolve()
+    if not source_code.exists() or not source_code.is_dir():
+        err(f"Source code directory does not exist or is not a directory: {source_code}")
+        sys.exit(1)
+
+    version_php = source_code / "version.php"
+    if not version_php.exists():
+        err(f"Invalid Moodle codebase: version.php not found in {source_code}")
+        sys.exit(1)
+
+    source_config_path = source_code / "config.php"
+    if not source_config_path.exists():
+        err(f"Existing config.php not found in {source_code}. Ensure source Moodle instance is valid.")
+        sys.exit(1)
+
+    # 2. Parse Source config.php
+    info("Analyzing existing Moodle configuration...")
+    try:
+        source_cfg = parse_moodle_config_php(source_config_path)
+    except Exception as e:
+        err(f"Failed to parse source config.php: {e}")
+        sys.exit(1)
+
+    source_dbtype = getattr(args, "db_type", None) or source_cfg.get("dbtype", "mariadb")
+    if source_dbtype in ["mysqli", "mysql"]:
+        source_dbtype = "mariadb"
+    elif source_dbtype in ["postgres", "postgresql"]:
+        source_dbtype = "pgsql"
+
+    source_wwwroot = source_cfg.get("wwwroot", "")
+    source_dataroot = getattr(args, "source_data", None) or source_cfg.get("dataroot", "")
+    source_prefix = source_cfg.get("prefix", "mdl_")
+
+    info(f"  Detected DB Engine:    {source_dbtype.upper()} (Database: {source_cfg.get('dbname')})")
+    info(f"  Detected Table Prefix: {source_prefix}")
+    info(f"  Detected WWW Root:     {source_wwwroot}")
+    info(f"  Detected Data Root:    {source_dataroot}")
+
+    # 3. Check Target Tenant Availability
+    site_dir = SITES_DIR / slug
+    if site_dir.exists():
+        if not getattr(args, "force", False):
+            err(f"Target tenant '{slug}' already exists at {site_dir}. Use -f/--force to overwrite.")
+            sys.exit(1)
+        else:
+            warn(f"Overwriting existing target tenant '{slug}'...")
+
+    # 4. Determine Target Domain & Layout
+    is_moodle5 = (source_code / "public").exists()
+    target_domain = getattr(args, "domain", None)
+    if not target_domain:
+        if source_wwwroot:
+            parsed = urllib.parse.urlparse(source_wwwroot)
+            target_domain = parsed.netloc or f"{slug}.localhost"
+        else:
+            target_domain = f"{slug}.localhost"
+
+    no_ssl = getattr(args, "no_ssl", False) or target_domain.startswith("localhost") or target_domain.endswith(".local")
+    proto = "http" if no_ssl else "https"
+    target_wwwroot = f"{proto}://{target_domain}"
+    info(f"  Target Domain:         {target_domain} ({target_wwwroot})")
+
+    # 5. Extract / Provision Database
+    env = ensure_core_env()
+    db_driver = get_db_driver(source_dbtype, env)
+    clean_slug = slug.replace("-", "_")
+    target_db_name = f"moodle_{clean_slug}"
+    target_db_user = f"moodle_{clean_slug}"
+    target_db_pass = gen_password(24)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        db_dump_file = tmp_path / "source_dump.sql"
+
+        if getattr(args, "db_dump", None):
+            user_dump = Path(args.db_dump).resolve()
+            if not user_dump.exists():
+                err(f"Specified database dump file not found: {user_dump}")
+                sys.exit(1)
+            info(f"Using provided SQL dump: {user_dump}")
+            if str(user_dump).endswith(".gz"):
+                import gzip
+                with gzip.open(user_dump, "rb") as f_in, open(db_dump_file, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            else:
+                shutil.copy2(user_dump, db_dump_file)
+        elif not getattr(args, "skip_db_dump", False):
+            info(f"Extracting source {source_dbtype.upper()} database '{source_cfg.get('dbname')}'...")
+            try:
+                db_driver.dump_database(source_cfg, db_dump_file)
+                success("Source database dump extracted successfully.")
+            except Exception as e:
+                err(f"Database dump failed: {e}\nTip: If source DB is remote or inaccessible directly, dump it manually and pass --db-dump <file.sql>.")
+                sys.exit(1)
+
+        # Provision target DB and User
+        info(f"Creating isolated {source_dbtype.upper()} database '{target_db_name}' and user '{target_db_user}'...")
+        db_driver.create_database(slug, target_db_name, target_db_user, target_db_pass)
+        success(f"Database '{target_db_name}' created.")
+
+        if db_dump_file.exists() and db_dump_file.stat().st_size > 0:
+            info("Importing database dump into target database...")
+            try:
+                db_driver.restore_database(slug, target_db_name, db_dump_file)
+                success("Database schema and data imported successfully.")
+            except Exception as e:
+                err(f"Failed to restore database into target: {e}")
+                sys.exit(1)
+
+    # 6. Migrate Codebase
+    site_dir.mkdir(parents=True, exist_ok=True)
+    target_code_dir = site_dir / "code"
+    if target_code_dir.exists():
+        safe_rmtree(target_code_dir)
+
+    info("Migrating Moodle codebase (preserving custom plugins, themes, and modifications)...")
+    shutil.copytree(source_code, target_code_dir)
+    success("Codebase migrated.")
+
+    # 7. Migrate or Link Moodledata
+    target_moodledata_dir = site_dir / "moodledata"
+    link_data = getattr(args, "link_data", False)
+
+    if link_data:
+        if not source_dataroot or not Path(source_dataroot).exists():
+            err(f"Cannot link moodledata: source path '{source_dataroot}' does not exist.")
+            sys.exit(1)
+        moodledata_mount_path = str(Path(source_dataroot).resolve())
+        info(f"Linking existing host moodledata directly: {moodledata_mount_path}")
+    else:
+        moodledata_mount_path = str(target_moodledata_dir)
+        if target_moodledata_dir.exists():
+            safe_rmtree(target_moodledata_dir)
+        target_moodledata_dir.mkdir(parents=True, exist_ok=True)
+        if source_dataroot and Path(source_dataroot).exists():
+            src_data = Path(source_dataroot).resolve()
+            info(f"Migrating moodledata from {src_data} (sanitizing ephemeral caches)...")
+            for item in src_data.iterdir():
+                if item.name in ["cache", "localcache", "sessions", "temp", "trashdir", "muc"]:
+                    continue
+                dest = target_moodledata_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dest)
+            success("Moodledata migrated.")
+        else:
+            warn(f"Source dataroot '{source_dataroot}' not found or empty. Created empty moodledata.")
+
+    # 8. Render Hardened config.php
+    info("Generating hardened MoodleKit config.php...")
+    db_host = db_driver.host
+    db_port = str(db_driver.port)
+    config_context = {
+        "SLUG": slug,
+        "DOMAIN": target_domain,
+        "WWWROOT": target_wwwroot,
+        "DB_TYPE": source_dbtype,
+        "IS_POSTGRES": source_dbtype == "pgsql",
+        "DB_HOST": db_host,
+        "DB_PORT": db_port,
+        "DB_NAME": target_db_name,
+        "DB_USER": target_db_user,
+        "DB_PASS": target_db_pass,
+        "DB_PREFIX": source_prefix,
+        "SSLPROXY": "true" if proto == "https" else "false",
+        "IS_MOODLE5": is_moodle5,
+        "USE_REDIS_SESSIONS": True,
+        "REDIS_HOST": "redis",
+        "REDIS_PORT": 6379,
+        "REDIS_AUTH": env.get("REDIS_PASSWORD", ""),
+    }
+    rendered_config = render_template(TEMPLATES_DIR / "config.php.tpl", config_context)
+    with open(target_code_dir / "config.php", "w") as f:
+        f.write(rendered_config)
+    success("config.php generated.")
+
+    # 9. Render Caddy Route & Site Compose File
+    has_public = (target_code_dir / "public").exists()
+    web_root = f"/var/www/html/{slug}/code/public" if has_public else f"/var/www/html/{slug}/code"
+    container_root = "/var/www/html/public" if has_public else "/var/www/html"
+    caddy_context = {
+        "SLUG": slug,
+        "DOMAIN": target_domain,
+        "UPSTREAM": f"moodle-app-{slug}:9000",
+        "WEB_ROOT": web_root,
+        "CONTAINER_ROOT": container_root,
+    }
+    with open(CADDY_SITES_DIR / f"{slug}.caddy", "w") as f:
+        f.write(render_template(TEMPLATES_DIR / "site.caddy.tpl", caddy_context))
+
+    plan_name = getattr(args, "plan", "medium") or "medium"
+    plan_name = plan_name.lower().strip()
+    if plan_name not in SIZING_PROFILES:
+        plan_name = "medium"
+    profile = SIZING_PROFILES[plan_name]
+
+    compose_context = {
+        "SLUG": slug,
+        "DOMAIN": target_domain,
+        "BASE_DIR": str(BASE_DIR),
+        "IMAGE_NAME": env.get("MOODLE_IMAGE", "moodlekit/moodle-app:8.3"),
+        "DB_TYPE": source_dbtype,
+        "DB_HOST": db_host,
+        "DB_PORT": db_port,
+        "DB_NAME": target_db_name,
+        "DB_USER": target_db_user,
+        "DB_PASS": target_db_pass,
+        "REDIS_AUTH": env.get("REDIS_PASSWORD", ""),
+        "MOODLEDATA_PATH": moodledata_mount_path,
+        "PLAN_NAME": plan_name,
+        "PLAN_DESC": profile["description"],
+        "FPM_PM": profile["fpm_pm"],
+        "FPM_MAX_CHILDREN": profile["fpm_max_children"],
+        "FPM_START_SERVERS": profile["fpm_start_servers"],
+        "FPM_MIN_SPARE": profile["fpm_min_spare"],
+        "FPM_MAX_SPARE": profile["fpm_max_spare"],
+        "FPM_IDLE_TIMEOUT": profile["fpm_idle_timeout"],
+        "FPM_MAX_REQUESTS": profile["fpm_max_requests"],
+        "PHP_MEM_LIMIT": profile["php_mem_limit"],
+        "CPU_LIMIT": profile["cpu_limit"],
+        "MEM_LIMIT": profile["mem_limit"],
+    }
+    compose_file = get_site_compose_file(slug)
+    with open(compose_file, "w") as f:
+        f.write(render_template(TEMPLATES_DIR / "tenant-compose.yml.tpl", compose_context))
+
+    # 10. Launch Containers & Reload Caddy
+    info("Starting tenant application and background cron worker...")
+    sync_master_compose()
+    run_cmd(["docker", "compose", "-p", "moodlekit", "-f", str(compose_file), "up", "-d"])
+    reload_caddy()
+
+    # 11. Run Composer Classmap Compilation if composer.json exists
+    if (target_code_dir / "composer.json").exists():
+        info("Compiling authoritative Composer classmap...")
+        composer_cli = [
+            "docker", "compose", "-p", "moodlekit", "-f", str(compose_file),
+            "exec", "-T", f"moodle-app-{slug}",
+            "gosu", "www-data",
+            "composer", "install", "--no-dev", "--classmap-authoritative", "--no-interaction",
+        ]
+        try:
+            run_cmd(composer_cli)
+        except Exception as e:
+            warn(f"Composer notice: {e}")
+
+    # 12. Harden File Permissions
+    info("Enforcing standard file and directory permissions...")
+    perm_fix_args = argparse.Namespace(slug=slug, mode="standard")
+    try:
+        cmd_site_fix_perms(perm_fix_args)
+    except Exception as e:
+        warn(f"Permission fix notice: {e}")
+
+    # 13. Run Domain URL Search-and-Replace if Domain Changed
+    if source_wwwroot and source_wwwroot.rstrip("/") != target_wwwroot.rstrip("/"):
+        replace_rel = "public/admin/tool/replace/cli/replace.php" if (target_code_dir / "public" / "admin" / "tool" / "replace" / "cli" / "replace.php").exists() else "admin/tool/replace/cli/replace.php"
+        if (target_code_dir / replace_rel).exists():
+            info(f"Domain URL changed ({source_wwwroot} -> {target_wwwroot}). Running Moodle search-and-replace...")
+            replace_cli = [
+                "docker", "compose", "-p", "moodlekit", "-f", str(compose_file),
+                "exec", "-T", f"moodle-app-{slug}",
+                "gosu", "www-data",
+                "php", f"/var/www/html/{replace_rel}",
+                f"--search={source_wwwroot.rstrip('/')}",
+                f"--replace={target_wwwroot.rstrip('/')}",
+                "--non-interactive",
+            ]
+            try:
+                run_cmd(replace_cli)
+                success("Database internal URLs updated.")
+            except Exception as e:
+                warn(f"Search-and-replace notice: {e}")
+
+    # 14. Purge Caches
+    purge_rel = "public/admin/cli/purge_caches.php" if (target_code_dir / "public" / "admin" / "cli" / "purge_caches.php").exists() else "admin/cli/purge_caches.php"
+    if (target_code_dir / purge_rel).exists():
+        info("Purging Moodle caches...")
+        purge_cli = [
+            "docker", "compose", "-p", "moodlekit", "-f", str(compose_file),
+            "exec", "-T", f"moodle-app-{slug}",
+            "gosu", "www-data",
+            "php", f"/var/www/html/{purge_rel}",
+        ]
+        try:
+            run_cmd(purge_cli)
+        except Exception:
+            pass
+
+    # Save Tenant Metadata
+    meta = {
+        "slug": slug,
+        "domain": target_domain,
+        "plan": plan_name,
+        "wwwroot": target_wwwroot,
+        "db_type": source_dbtype,
+        "db_name": target_db_name,
+        "db_user": target_db_user,
+        "db_pass": target_db_pass,
+        "moodledata_path": moodledata_mount_path,
+        "adopted_from": str(source_code),
+        "created_at": datetime.now().isoformat(),
+    }
+    with open(site_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    cprint("\n=================================================================", C_GREEN, bold=True)
+    cprint(f"    Existing Moodle Instance '{slug}' Adopted Successfully!    ", C_GREEN, bold=True)
+    cprint("=================================================================", C_GREEN, bold=True)
+    print(f"  URL:             {target_wwwroot}")
+    print(f"  Sizing Plan:     {plan_name.upper()} ({profile['description']})")
+    print(f"  Database Engine: {source_dbtype.upper()} ({target_db_name} on {db_host}:{db_port})")
+    print(f"  Code Path:       {target_code_dir}")
+    print(f"  Data Root:       {moodledata_mount_path}")
+    print(f"  Web Routing:     Caddy TLS with 503 Overload Shield")
+    print(f"  Redis Cache:     Enabled ({slug}_sess_)")
+    cprint("=================================================================\n", C_GREEN, bold=True)
 
 
 # =============================================================================
@@ -1200,6 +1831,10 @@ def cmd_site_resize(args: argparse.Namespace) -> None:
 
     domain = meta.get("domain", f"{slug}.localhost")
     db_pass = meta.get("db_pass", "")
+    db_type = meta.get("db_type", "mariadb")
+    db_host = "postgres" if db_type == "pgsql" else "db"
+    db_port = "5432" if db_type == "pgsql" else "3306"
+    moodledata_path = meta.get("moodledata_path", str(site_dir / "moodledata"))
     env = ensure_core_env()
 
     compose_context = {
@@ -1207,8 +1842,14 @@ def cmd_site_resize(args: argparse.Namespace) -> None:
         "DOMAIN": domain,
         "BASE_DIR": str(BASE_DIR),
         "IMAGE_NAME": env.get("MOODLE_IMAGE", "moodlekit/moodle-app:8.3"),
+        "DB_TYPE": db_type,
+        "DB_HOST": db_host,
+        "DB_PORT": db_port,
+        "DB_NAME": f"moodle_{slug}",
+        "DB_USER": f"moodle_{slug}",
         "DB_PASS": db_pass,
         "REDIS_AUTH": env.get("REDIS_PASSWORD", ""),
+        "MOODLEDATA_PATH": moodledata_path,
         "PLAN_NAME": plan_name,
         "PLAN_DESC": profile["description"],
         "FPM_PM": profile["fpm_pm"],
@@ -1328,6 +1969,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc = site_sub.add_parser("create", help="Create a new Moodle tenant")
     p_sc.add_argument("slug", help="Unique tenant slug (e.g. academy)")
     p_sc.add_argument("-d", "--domain", help="Custom domain or subdomain")
+    p_sc.add_argument("--db-type", choices=["mariadb", "pgsql"], default="mariadb", help="Database engine (mariadb or pgsql)")
     p_sc.add_argument("--plan", choices=list(SIZING_PROFILES.keys()), default="medium", help="Tenant sizing plan (small, medium, big, enterprise)")
     p_sc.add_argument("-m", "--moodle-version", default="5.2", help="Moodle version (5.2 or 4.5)")
     p_sc.add_argument("-u", "--admin-user", default="admin", help="Moodle admin username")
@@ -1341,6 +1983,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc.add_argument("--skip-download", action="store_true", help="Skip codebase download")
     p_sc.add_argument("--skip-install", action="store_true", help="Skip CLI database install")
     p_sc.add_argument("-f", "--force", action="store_true", help="Force overwrite / override constraints")
+
+    # site adopt
+    p_sa = site_sub.add_parser("adopt", help="Adopt an existing Moodle installation (PostgreSQL or MariaDB)")
+    p_sa.add_argument("slug", help="Unique tenant slug for adopted site")
+    p_sa.add_argument("--source-code", required=True, help="Path to existing Moodle code directory")
+    p_sa.add_argument("--source-data", help="Path to existing moodledata directory (defaults to dataroot from config.php)")
+    p_sa.add_argument("--db-dump", help="Path to SQL database dump file (optional, auto-dumps if omitted)")
+    p_sa.add_argument("--db-type", choices=["mariadb", "pgsql"], help="Override database engine (defaults to dbtype from config.php)")
+    p_sa.add_argument("-d", "--domain", help="New target domain (defaults to wwwroot from config.php)")
+    p_sa.add_argument("--plan", choices=list(SIZING_PROFILES.keys()), default="medium", help="Tenant sizing plan")
+    p_sa.add_argument("--link-data", action="store_true", help="Directly volume-mount host moodledata instead of copying")
+    p_sa.add_argument("--skip-db-dump", action="store_true", help="Skip dumping database (if already present in DB server)")
+    p_sa.add_argument("--no-ssl", action="store_true", help="Disable HTTPS")
+    p_sa.add_argument("-f", "--force", action="store_true", help="Force overwrite if tenant already exists")
 
     # site resize
     p_resize = site_sub.add_parser("resize", help="Dynamically resize a tenant's plan and resource limits")
@@ -1415,6 +2071,8 @@ def main() -> None:
             cmd_site_plans(args)
         elif args.subcommand == "create":
             cmd_site_create(args)
+        elif args.subcommand == "adopt":
+            cmd_site_adopt(args)
         elif args.subcommand == "resize":
             cmd_site_resize(args)
         elif args.subcommand == "list":
@@ -1437,5 +2095,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

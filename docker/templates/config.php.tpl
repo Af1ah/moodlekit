@@ -20,7 +20,12 @@ $CFG->dboptions = [
     'dbpersist'     => 0,
     'dbport'        => '{{DB_PORT}}',
     'dbsocket'      => '',
+{{#IS_POSTGRES}}
+    'dbcollation'   => 'utf8',
+{{/IS_POSTGRES}}
+{{^IS_POSTGRES}}
     'dbcollation'   => 'utf8mb4_unicode_ci',
+{{/IS_POSTGRES}}
     'connecttimeout'=> 20,
 ];
 

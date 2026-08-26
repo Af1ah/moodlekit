@@ -26,6 +26,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -324,7 +325,14 @@ class MariaDBDriver(BaseDBDriver):
         self.port = 3306
         self.db_type = "mariadb"
 
+    def ensure_running(self) -> None:
+        try:
+            compose_core_cmd(["up", "-d", "db"])
+        except Exception:
+            pass
+
     def exec_query(self, query: str) -> subprocess.CompletedProcess:
+        self.ensure_running()
         cmd = [
             "docker", "compose",
             "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -339,6 +347,7 @@ class MariaDBDriver(BaseDBDriver):
         return run_cmd(cmd, capture=True)
 
     def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
+        self.ensure_running()
         sql = f"""
         CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}';
@@ -354,7 +363,8 @@ class MariaDBDriver(BaseDBDriver):
         spass = source_config.get("dbpass", "")
         sdb = source_config.get("dbname", "")
 
-        if shost in ["db", "127.0.0.1", "localhost"]:
+        if shost == "db":
+            self.ensure_running()
             dump_cmd = [
                 "docker", "compose",
                 "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -370,7 +380,15 @@ class MariaDBDriver(BaseDBDriver):
             with open(output_file, "w") as f:
                 subprocess.run(dump_cmd, stdout=f, check=True)
         else:
-            dump_cmd = ["mariadb-dump", "--skip-ssl", "-h", shost, "-P", sport, "-u", suser]
+            target_host = "127.0.0.1" if shost in ["127.0.0.1", "localhost"] else shost
+            dump_cmd = [
+                "docker", "run", "--rm", "--network", "host",
+                self.env.get("MOODLE_IMAGE", "moodlekit/moodle-app:8.3"),
+                "mariadb-dump", "--skip-ssl",
+                "-h", target_host,
+                "-P", sport,
+                "-u", suser,
+            ]
             if spass:
                 dump_cmd.append(f"-p{spass}")
             dump_cmd.extend(["--single-transaction", "--quick", "--max_allowed_packet=512M", sdb])
@@ -378,6 +396,7 @@ class MariaDBDriver(BaseDBDriver):
                 subprocess.run(dump_cmd, stdout=f, check=True)
 
     def restore_database(self, slug: str, db_name: str, dump_file: Path) -> None:
+        self.ensure_running()
         import_cmd = [
             "docker", "compose",
             "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -402,7 +421,14 @@ class PostgresDriver(BaseDBDriver):
         self.port = 5432
         self.db_type = "pgsql"
 
+    def ensure_running(self) -> None:
+        try:
+            compose_core_cmd(["up", "-d", "postgres"])
+        except Exception:
+            pass
+
     def exec_query(self, query: str, db: str = "postgres") -> subprocess.CompletedProcess:
+        self.ensure_running()
         cmd = [
             "docker", "compose",
             "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -418,6 +444,7 @@ class PostgresDriver(BaseDBDriver):
         return run_cmd(cmd, capture=True)
 
     def create_database(self, slug: str, db_name: str, db_user: str, db_pass: str) -> None:
+        self.ensure_running()
         role_sql = f"""
         DO $$
         BEGIN
@@ -442,7 +469,7 @@ class PostgresDriver(BaseDBDriver):
         spass = source_config.get("dbpass", "")
         sdb = source_config.get("dbname", "")
 
-        if shost in ["postgres", "127.0.0.1", "localhost"]:
+        if shost == "postgres":
             dump_cmd = [
                 "docker", "compose",
                 "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -461,12 +488,13 @@ class PostgresDriver(BaseDBDriver):
             with open(output_file, "w") as f:
                 subprocess.run(dump_cmd, stdout=f, check=True)
         else:
-            dump_env = os.environ.copy()
-            if spass:
-                dump_env["PGPASSWORD"] = spass
+            target_host = "127.0.0.1" if shost in ["127.0.0.1", "localhost"] else shost
             dump_cmd = [
+                "docker", "run", "--rm", "--network", "host",
+                "-e", f"PGPASSWORD={spass}",
+                "postgres:16-alpine",
                 "pg_dump",
-                "-h", shost,
+                "-h", target_host,
                 "-p", sport,
                 "-U", suser,
                 "-d", sdb,
@@ -476,9 +504,10 @@ class PostgresDriver(BaseDBDriver):
                 "--no-privileges",
             ]
             with open(output_file, "w") as f:
-                subprocess.run(dump_cmd, stdout=f, check=True, env=dump_env)
+                subprocess.run(dump_cmd, stdout=f, check=True)
 
     def restore_database(self, slug: str, db_name: str, dump_file: Path) -> None:
+        self.ensure_running()
         import_cmd = [
             "docker", "compose",
             "-f", str(DOCKER_DIR / "compose.core.yml"),
@@ -645,7 +674,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def download_moodle_source(target_dir: Path, version: str) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
-    if (target_dir / "index.php").exists() and (target_dir / "version.php").exists():
+    if (target_dir / "index.php").exists() and ((target_dir / "version.php").exists() or (target_dir / "public" / "version.php").exists()):
         info("Existing Moodle codebase detected in target directory. Skipping download.")
         return
 
@@ -1320,14 +1349,22 @@ def cmd_site_adopt(args: argparse.Namespace) -> None:
         err(f"Source code directory does not exist or is not a directory: {source_code}")
         sys.exit(1)
 
-    version_php = source_code / "version.php"
-    if not version_php.exists():
-        err(f"Invalid Moodle codebase: version.php not found in {source_code}")
+    version_php = None
+    for cand in ["version.php", "public/version.php"]:
+        if (source_code / cand).exists():
+            version_php = source_code / cand
+            break
+    if not version_php:
+        err(f"Invalid Moodle codebase: version.php not found in {source_code} or {source_code / 'public'}")
         sys.exit(1)
 
-    source_config_path = source_code / "config.php"
-    if not source_config_path.exists():
-        err(f"Existing config.php not found in {source_code}. Ensure source Moodle instance is valid.")
+    source_config_path = None
+    for cand in ["config.php", "public/config.php"]:
+        if (source_code / cand).exists():
+            source_config_path = source_code / cand
+            break
+    if not source_config_path:
+        err(f"Existing config.php not found in {source_code} or {source_code / 'public'}. Ensure source Moodle instance is valid.")
         sys.exit(1)
 
     # 2. Parse Source config.php
@@ -1431,7 +1468,7 @@ def cmd_site_adopt(args: argparse.Namespace) -> None:
         safe_rmtree(target_code_dir)
 
     info("Migrating Moodle codebase (preserving custom plugins, themes, and modifications)...")
-    shutil.copytree(source_code, target_code_dir)
+    shutil.copytree(source_code, target_code_dir, symlinks=True, ignore_dangling_symlinks=True)
     success("Codebase migrated.")
 
     # 7. Migrate or Link Moodledata
@@ -1452,14 +1489,23 @@ def cmd_site_adopt(args: argparse.Namespace) -> None:
         if source_dataroot and Path(source_dataroot).exists():
             src_data = Path(source_dataroot).resolve()
             info(f"Migrating moodledata from {src_data} (sanitizing ephemeral caches)...")
-            for item in src_data.iterdir():
-                if item.name in ["cache", "localcache", "sessions", "temp", "trashdir", "muc"]:
-                    continue
-                dest = target_moodledata_dir / item.name
-                if item.is_dir():
-                    shutil.copytree(item, dest, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(item, dest)
+            copy_script = """
+            for item in /src/*; do
+                [ -e "$item" ] || continue
+                name=$(basename "$item")
+                case "$name" in
+                    cache|localcache|sessions|temp|trashdir|muc) continue ;;
+                    *) cp -a "$item" /dst/ ;;
+                esac
+            done
+            chown -R 33:33 /dst
+            """
+            run_cmd([
+                "docker", "run", "--rm",
+                "-v", f"{src_data}:/src:ro",
+                "-v", f"{target_moodledata_dir}:/dst",
+                "alpine", "sh", "-c", copy_script,
+            ])
             success("Moodledata migrated.")
         else:
             warn(f"Source dataroot '{source_dataroot}' not found or empty. Created empty moodledata.")
@@ -1721,22 +1767,23 @@ def cmd_site_plugin_install(args: argparse.Namespace) -> None:
             "tinymce_": "lib/editor/tinymce/plugins",
             "tiny_": "lib/editor/tiny/plugins",
         }
+        base_code = site_dir / "code" / "public" if (site_dir / "code" / "public").exists() else site_dir / "code"
         dest_parent = None
         plugin_name = component
         for prefix, path in prefix_map.items():
             if component.startswith(prefix):
-                dest_parent = site_dir / "code" / path
+                dest_parent = base_code / path
                 plugin_name = component[len(prefix):]
                 break
 
         if not dest_parent:
-            dest_parent = site_dir / "code" / "local"
+            dest_parent = base_code / "local"
             plugin_name = component
 
         dest_dir = dest_parent / plugin_name
         if dest_dir.exists():
             warn(f"Existing plugin directory {dest_dir} will be replaced.")
-            shutil.rmtree(dest_dir)
+            safe_rmtree(dest_dir)
 
         dest_parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(plugin_folder, dest_dir)

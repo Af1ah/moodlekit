@@ -7,4 +7,4 @@ name: moodlekit
 include:
   - docker/compose.core.yml
   - sites/lms2/compose.yml
-  - sites/test_adopted/compose.yml
+  - sites/local_lms/compose.yml

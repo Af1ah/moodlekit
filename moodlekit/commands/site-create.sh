@@ -152,6 +152,21 @@ cmd_site_create() {
     step 1 12 "Validate slug and check conflicts"
     check_slug_conflicts "${SLUG}"
     check_disk_space "/var/www" 3
+
+    # Moodle's installer requires the XML parser. Repair this bootstrap
+    # dependency before creating any site resources rather than failing late.
+    if ! "/usr/bin/php${PHP_VERSION}" -r \
+        'exit(function_exists("xml_parser_create") ? 0 : 1);' 2>/dev/null; then
+        warn "PHP ${PHP_VERSION} XML parser extension is missing; installing it now."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "php${PHP_VERSION}-xml"
+        if ! "/usr/bin/php${PHP_VERSION}" -r \
+            'exit(function_exists("xml_parser_create") ? 0 : 1);' 2>/dev/null; then
+            err "PHP XML parser is still unavailable after installing php${PHP_VERSION}-xml."
+            err "Check /etc/php/${PHP_VERSION}/cli/conf.d for the XML module configuration."
+            return 1
+        fi
+        ok "PHP XML parser extension installed"
+    fi
     ok "No conflicts — proceeding"
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -300,6 +315,8 @@ cmd_site_create() {
     mkdir -p "${MOODLEDATA_DIR}"
     chown -R www-data:www-data "${MOODLEDATA_DIR}"
     chmod -R 02777 "${MOODLEDATA_DIR}"
+    # The CLI installer runs as www-data and must be able to traverse parents.
+    chmod o+x /var/www /var/www/moodle "$(dirname "${MOODLEDATA_DIR}")"
     register_rollback "rm -rf '${MOODLEDATA_DIR}'"
 
     # Optional: ACLs for web-based plugin installation
@@ -388,6 +405,10 @@ cmd_site_create() {
 
     # For initial HTTP-only (before certbot), strip TLS directives temporarily
     # We use a simpler HTTP-only block first for certbot ACME challenge
+    mkdir -p /var/www/letsencrypt/.well-known/acme-challenge
+    chown root:www-data /var/www/letsencrypt
+    chmod 755 /var/www/letsencrypt /var/www/letsencrypt/.well-known \
+        /var/www/letsencrypt/.well-known/acme-challenge
     local initial_docroot
     initial_docroot="$(get_moodle_docroot "${MOODLE_DIR}")"
     cat > "${NGINX_CONF}.http-only" << HTTPONLY
@@ -487,6 +508,7 @@ HTTPONLY
         # Temporarily grant www-data ownership so it can write config.php
         chown www-data "${MOODLE_DIR}"
 
+        set +e
         sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${installer}" \
             --chmod=02777 \
             --lang=en \
@@ -506,10 +528,17 @@ HTTPONLY
             --adminemail="${ADMIN_EMAIL}" \
             --agree-license \
             --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
+        local installer_exit="${PIPESTATUS[0]}"
+        set -e
 
         # Lock ownership back to root for security
         chown root "${MOODLE_DIR}"
 
+        if [[ "${installer_exit}" -ne 0 ]]; then
+            spinner_stop 1 "Moodle installer failed (exit code ${installer_exit})"
+            err "Installation stopped. Review: ${_LOG_FILE}"
+            return "${installer_exit}"
+        fi
         spinner_stop 0 "Moodle installed"
     fi
 

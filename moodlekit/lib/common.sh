@@ -168,6 +168,9 @@ clear_rollbacks() {
 _err_handler() {
     local exit_code=$?
     local line_no="${1:-unknown}"
+    if type spinner_stop &>/dev/null && [[ -n "${_SPINNER_PID:-}" ]]; then
+        spinner_stop 1 "Operation stopped"
+    fi
     if [[ -n "${_CURRENT_STEP:-}" ]]; then
         err "Failed during ${_CURRENT_STEP} (line ${line_no}, exit code ${exit_code})."
     else
@@ -181,6 +184,9 @@ trap '_err_handler ${LINENO}' ERR
 
 _interrupt_handler() {
     echo "" >&2
+    if type spinner_stop &>/dev/null && [[ -n "${_SPINNER_PID:-}" ]]; then
+        spinner_stop 1 "Operation interrupted"
+    fi
     warn "Operation interrupted by user. Cleaning up incomplete changes..."
     [[ -n "${_LOG_FILE:-}" ]] && warn "Partial-operation log: ${_LOG_FILE}"
     run_rollbacks
@@ -1005,6 +1011,9 @@ generate_self_signed_fallback() {
     sed -i "s|/etc/letsencrypt/live/${domain}/fullchain.pem|${ssl_dir}/fullchain.pem|g" "${nginx_conf}"
     sed -i "s|/etc/letsencrypt/live/${domain}/privkey.pem|${ssl_dir}/privkey.pem|g" "${nginx_conf}"
     sed -i "s|ssl_trusted_certificate.*||g" "${nginx_conf}"
+    # OCSP stapling requires an issuer chain and is not applicable to a
+    # self-signed origin certificate (including Cloudflare Full mode).
+    sed -i '/^[[:space:]]*ssl_stapling\(_verify\)\?[[:space:]]/d' "${nginx_conf}"
     
     warn "Self-signed fallback applied. Nginx is using port 443 with self-signed cert."
     warn "If using Cloudflare, ensure SSL/TLS encryption mode is set to 'Full' (not 'Strict')."

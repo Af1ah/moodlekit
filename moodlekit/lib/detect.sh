@@ -67,6 +67,23 @@ detect_hardware() {
 # Pre-existing tool detection
 # Checks every tool with version flags; sets INSTALLED_* variables
 # ---------------------------------------------------------------------------
+detect_mysql_server_flavor() {
+    local server_identity=""
+    if command -v mysql &>/dev/null; then
+        server_identity="$(timeout 5s mysql -NBe \
+            "SELECT CONCAT(VERSION(), ' ', @@version_comment);" 2>/dev/null || true)"
+    fi
+    if [[ -z "${server_identity}" ]] && command -v mysqld &>/dev/null; then
+        server_identity="$(timeout 5s mysqld --version 2>/dev/null || true)"
+    fi
+
+    if [[ "${server_identity,,}" == *mariadb* ]]; then
+        echo "mariadb"
+    elif [[ "${server_identity,,}" == *mysql* ]]; then
+        echo "mysql"
+    fi
+}
+
 detect_installed() {
     info "Scanning for pre-installed software..."
     info "Version checks are limited to 5 seconds per program."
@@ -100,20 +117,26 @@ detect_installed() {
         INSTALLED_TOOLS+=("PostgreSQL ${POSTGRES_INSTALLED_VERSION}")
     fi
 
-    # ── MariaDB ──
+    # ── MariaDB / MySQL ──
+    # Detect the running server, not the client executable. A MariaDB client
+    # can connect to MySQL (and vice versa), so client names are not reliable.
     MARIADB_INSTALLED=""
     MARIADB_INSTALLED_VERSION=""
-    if command -v mariadb &>/dev/null 2>&1; then
-        MARIADB_INSTALLED_VERSION="$(timeout 5s mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-        MARIADB_INSTALLED="${MARIADB_INSTALLED_VERSION%%.*}"
-        INSTALLED_TOOLS+=("MariaDB ${MARIADB_INSTALLED_VERSION}")
-    fi
-
-    # ── MySQL ──
     MYSQL_INSTALLED=""
     MYSQL_INSTALLED_VERSION=""
-    if command -v mysql &>/dev/null 2>&1 && [[ -z "${MARIADB_INSTALLED}" ]]; then
-        MYSQL_INSTALLED_VERSION="$(timeout 5s mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    local mysql_flavor mysql_server_identity mysql_server_version
+    mysql_flavor="$(detect_mysql_server_flavor)"
+    mysql_server_identity="$(timeout 5s mysql -NBe \
+        "SELECT CONCAT(VERSION(), ' ', @@version_comment);" 2>/dev/null || true)"
+    [[ -z "${mysql_server_identity}" ]] && mysql_server_identity="$(timeout 5s mysqld --version 2>/dev/null || true)"
+    mysql_server_version="$(echo "${mysql_server_identity}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+
+    if [[ "${mysql_flavor}" == "mariadb" ]]; then
+        MARIADB_INSTALLED_VERSION="${mysql_server_version}"
+        MARIADB_INSTALLED="${MARIADB_INSTALLED_VERSION%%.*}"
+        INSTALLED_TOOLS+=("MariaDB ${MARIADB_INSTALLED_VERSION}")
+    elif [[ "${mysql_flavor}" == "mysql" ]]; then
+        MYSQL_INSTALLED_VERSION="${mysql_server_version}"
         MYSQL_INSTALLED="${MYSQL_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("MySQL ${MYSQL_INSTALLED_VERSION}")
     fi

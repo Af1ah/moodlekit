@@ -87,6 +87,18 @@ cmd_site_create() {
         confirm "Enable web-based plugin installation? (sets ACLs)" "n" && ENABLE_PLUGIN_INSTALL=1
     fi
 
+    # Correct stale/misdetected global configuration by asking the actual
+    # database server. Client executable names cannot distinguish these forks.
+    if [[ "${DB_TYPE}" == "mariadb" || "${DB_TYPE}" == "mysql" ]]; then
+        local actual_mysql_flavor
+        actual_mysql_flavor="$(detect_mysql_server_flavor)"
+        if [[ -n "${actual_mysql_flavor}" && "${actual_mysql_flavor}" != "${DB_TYPE}" ]]; then
+            warn "Configured database type is '${DB_TYPE}', but the running server is '${actual_mysql_flavor}'."
+            info "Using '${actual_mysql_flavor}' so Moodle applies the correct compatibility checks."
+            DB_TYPE="${actual_mysql_flavor}"
+        fi
+    fi
+
     MOODLE_DIR="/var/www/moodle/${SLUG}"
     MOODLEDATA_DIR="/var/moodledata/${SLUG}"
     DB_NAME="moodle_${SLUG}"
@@ -509,7 +521,9 @@ HTTPONLY
         chown www-data "${MOODLE_DIR}"
 
         set +e
-        sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${installer}" \
+        # Start from a directory www-data can traverse. Invoking MoodleKit from
+        # /root would otherwise make Moodle's attempt to restore cwd emit EACCES.
+        ( cd "${MOODLE_DIR}" && sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${installer}" \
             --chmod=02777 \
             --lang=en \
             --wwwroot="https://${DOMAIN}" \
@@ -527,7 +541,7 @@ HTTPONLY
             --adminpass="${ADMIN_PASS}" \
             --adminemail="${ADMIN_EMAIL}" \
             --agree-license \
-            --non-interactive 2>&1 | tee -a "${_LOG_FILE}"
+            --non-interactive ) 2>&1 | tee -a "${_LOG_FILE}"
         local installer_exit="${PIPESTATUS[0]}"
         set -e
 

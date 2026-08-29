@@ -871,13 +871,17 @@ confirm_destructive() {
         return 0
     fi
     echo -e "${C_BOLD_RED}${prompt}${C_RESET}"
-    echo -n "Type '${confirm_word}' to confirm: "
-    local input
-    read -r input
-    if [[ "${input}" != "${confirm_word}" ]]; then
-        info "Aborted."
-        exit 0
-    fi
+    info "Press Ctrl+C to cancel."
+    while true; do
+        echo -n "Type '${confirm_word}' to confirm: "
+        local input
+        read -r input
+        if [[ "${input}" == "${confirm_word}" ]]; then
+            return 0
+        fi
+        warn "Confirmation did not match. Expected '${confirm_word}', but received '${input:-<empty>}'."
+        info "Nothing has been deleted. Please try again."
+    done
 }
 
 # Print a nice summary box

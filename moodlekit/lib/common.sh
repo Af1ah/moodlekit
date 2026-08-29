@@ -485,13 +485,10 @@ detect_fpm_socket() {
         fi
     done
 
-    # 3. Check general running pool socket
-    if [[ -S "/run/php/php${php_ver}-fpm.sock" ]]; then
-        echo "/run/php/php${php_ver}-fpm.sock"
-        return 0
-    fi
-
-    # 4. Standard clean default socket naming for dedicated site pool
+    # Never reuse the general www pool socket here. Each Moodle tenant gets a
+    # dedicated pool, and two FPM pools cannot listen on the same Unix socket.
+    # Existing tenant sockets/configs were resolved above; a new tenant uses
+    # the canonical slug-specific address below.
     echo "/run/php/php${php_ver}-fpm-${slug}.sock"
 }
 
@@ -804,7 +801,25 @@ reload_fpm() {
         dry_run_note "systemctl reload ${svc}"
         return 0
     fi
-    systemctl reload "${svc}" || systemctl restart "${svc}"
+
+    local fpm_bin="php-fpm${php_ver}"
+    if [[ -n "${php_ver}" ]] && command -v "${fpm_bin}" &>/dev/null; then
+        local config_test_output
+        if ! config_test_output="$("${fpm_bin}" -t 2>&1)"; then
+            err "PHP-FPM ${php_ver} configuration test failed; service was not reloaded."
+            echo "${config_test_output}" | tee -a "${_LOG_FILE:-/dev/null}" >&2
+            err "Inspect pool files in /etc/php/${php_ver}/fpm/pool.d/"
+            return 1
+        fi
+    fi
+
+    if systemctl is-active --quiet "${svc}"; then
+        systemctl reload "${svc}"
+    else
+        warn "${svc} is not active; starting it after configuration validation."
+        systemctl reset-failed "${svc}" 2>/dev/null || true
+        systemctl start "${svc}"
+    fi
     ok "PHP-FPM reloaded (${svc})"
 }
 

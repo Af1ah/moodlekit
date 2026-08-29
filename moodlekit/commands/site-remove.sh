@@ -122,7 +122,13 @@ cmd_site_remove() {
     # Step 4 — Remove FPM pool
     # ─────────────────────────────────────────────────────────────────────────
     step 4 9 "Remove PHP-FPM pool"
-    rm -f "${FPM_POOL_CONF:-/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${SLUG}.conf}"
+    # Creation/restoration use <slug>.conf; older and auto-discovered sites may
+    # use moodle_<slug>.conf. Remove both so an interrupted install cannot leave
+    # a stale pool that prevents the whole PHP-FPM service from starting.
+    rm -f \
+        "${FPM_POOL_CONF:-/etc/php/${PHP_VERSION}/fpm/pool.d/${SLUG}.conf}" \
+        "/etc/php/${PHP_VERSION}/fpm/pool.d/${SLUG}.conf" \
+        "/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${SLUG}.conf"
     reload_fpm "${PHP_VERSION}"
     ok "FPM pool removed"
 

@@ -58,7 +58,9 @@ db_mysql_user_exists() {
 
 # ---------------------------------------------------------------------------
 # Create database and user
-# MySQL 8.x uses caching_sha2_password by default; change to native for compat
+# MySQL 8.4 disables mysql_native_password by default. Use the server default
+# authentication plugin (caching_sha2_password on supported MySQL releases),
+# which current PHP mysqlnd and supported Moodle releases understand.
 # ---------------------------------------------------------------------------
 db_mysql_create() {
     local slug="$1"
@@ -74,8 +76,7 @@ db_mysql_create() {
     else
         mysql -u root << MYSQLSQL
 CREATE USER '${db_user}'@'${db_host}'
-    IDENTIFIED WITH mysql_native_password
-    BY '${db_pass}';
+    IDENTIFIED BY '${db_pass}';
 MYSQLSQL
         ok "User '${db_user}' created"
     fi

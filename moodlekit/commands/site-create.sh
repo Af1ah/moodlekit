@@ -388,12 +388,14 @@ cmd_site_create() {
 
     # For initial HTTP-only (before certbot), strip TLS directives temporarily
     # We use a simpler HTTP-only block first for certbot ACME challenge
+    local initial_docroot
+    initial_docroot="$(get_moodle_docroot "${MOODLE_DIR}")"
     cat > "${NGINX_CONF}.http-only" << HTTPONLY
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN};
-    root ${IS_MOODLE5:+${MOODLE_DIR}/public}${IS_MOODLE5:-${MOODLE_DIR}};
+    root ${initial_docroot};
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
@@ -420,11 +422,19 @@ HTTPONLY
         warn "TLS skipped (--skip-tls). Site will use HTTPS with a self-signed fallback."
         generate_self_signed_fallback "${DOMAIN}" "${NGINX_CONF}"
     else
+        local certbot_contact_args=()
+        if [[ -n "${LETSENCRYPT_EMAIL:-}" ]]; then
+            certbot_contact_args=(--email "${LETSENCRYPT_EMAIL}")
+        else
+            certbot_contact_args=(--register-unsafely-without-email)
+            warn "No Let's Encrypt email configured; registering without an email address."
+            warn "Certificate expiry and account notices will not be delivered by email."
+        fi
         if ! certbot certonly \
             --webroot \
             --webroot-path /var/www/letsencrypt \
             --domain "${DOMAIN}" \
-            --email "${LETSENCRYPT_EMAIL}" \
+            "${certbot_contact_args[@]}" \
             --agree-tos \
             --non-interactive \
             --quiet; then

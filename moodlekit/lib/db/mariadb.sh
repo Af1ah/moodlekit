@@ -141,6 +141,7 @@ host=localhost
 MYCNF
     chmod 600 "${tmp_mycnf}"
 
+    set +e
     mysqldump \
         --defaults-extra-file="${tmp_mycnf}" \
         --single-transaction \
@@ -152,10 +153,12 @@ MYCNF
         | gzip -c > "${output_file}"
 
     local dump_exit="${PIPESTATUS[0]}"
+    set -e
     rm -f "${tmp_mycnf}"
 
     if [[ "${dump_exit}" -ne 0 ]]; then
         err "mysqldump failed (exit code ${dump_exit})"
+        rm -f "${output_file}"
         return 1
     fi
 

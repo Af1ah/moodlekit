@@ -39,6 +39,23 @@ cmd_site_remove() {
         PHP_VERSION="${PHP_VERSION:-8.3}"
     fi
 
+    # Treat incomplete persisted records like partial installations. Keep the
+    # conventional names visible, but do not pretend they were recovered.
+    local incomplete_record=0
+    if [[ -z "${DB_NAME:-}" || -z "${DB_USER:-}" || -z "${DB_TYPE:-}" ]]; then
+        incomplete_record=1
+        warn "The saved record for '${SLUG}' is incomplete (likely an interrupted install)."
+        [[ -z "${DB_TYPE:-}" ]] && DB_TYPE="mariadb"
+        [[ -z "${DB_NAME:-}" ]] && DB_NAME="moodle_${SLUG}"
+        [[ -z "${DB_USER:-}" ]] && DB_USER="moodle_${SLUG}"
+        DB_PASS="${DB_PASS:-}"
+        warn "Using expected cleanup names: database '${DB_NAME}', user '${DB_USER}'."
+    fi
+    DOMAIN="${DOMAIN:-${SLUG}.${BASE_DOMAIN:-}}"
+    MOODLE_DIR="${MOODLE_DIR:-/var/www/moodle/${SLUG}}"
+    MOODLEDATA_DIR="${MOODLEDATA_DIR:-/var/moodledata/${SLUG}}"
+    PHP_VERSION="${PHP_VERSION:-8.3}"
+
     init_logging "site-remove-${SLUG}"
 
     section "MoodleKit — Remove Site: ${SLUG}"
@@ -52,7 +69,16 @@ cmd_site_remove() {
     if [[ "${FORCE}" -eq 0 ]]; then
         # Offer backup first
         if confirm "Create a backup before removing?" "y"; then
-            cmd_backup_site "${SLUG}"
+            # Isolate backup configuration loading so an incomplete saved
+            # record cannot overwrite the cleanup values resolved above.
+            if ! ( cmd_backup_site "${SLUG}" ); then
+                echo ""
+                warn "Backup failed; no site resources have been deleted."
+                if ! confirm "Continue permanent removal WITHOUT a backup?" "n"; then
+                    info "Removal cancelled. The site was left unchanged."
+                    return 1
+                fi
+            fi
         fi
 
         # Confirm with slug
@@ -104,10 +130,14 @@ cmd_site_remove() {
     # Step 5 — Drop database
     # ─────────────────────────────────────────────────────────────────────────
     step 5 9 "Drop database"
+    if [[ "${incomplete_record}" -eq 1 ]]; then
+        warn "Cleaning expected database resources from the incomplete install."
+    fi
     case "${DB_TYPE}" in
         postgres) db_pg_drop "${DB_NAME}" "${DB_USER}" ;;
         mariadb)  db_maria_drop "${DB_NAME}" "${DB_USER}" ;;
         mysql)    db_mysql_drop "${DB_NAME}" "${DB_USER}" ;;
+        *) warn "Unknown database type '${DB_TYPE}'; database cleanup skipped" ;;
     esac
 
     # ─────────────────────────────────────────────────────────────────────────

@@ -69,6 +69,7 @@ detect_hardware() {
 # ---------------------------------------------------------------------------
 detect_installed() {
     info "Scanning for pre-installed software..."
+    info "Version checks are limited to 5 seconds per program."
     INSTALLED_TOOLS=()
 
     # ── PHP ──
@@ -78,14 +79,14 @@ detect_installed() {
     for ver in 8.4 8.3 8.1; do
         if command -v "php${ver}" &>/dev/null 2>&1; then
             PHP_INSTALLED="${ver}"
-            PHP_INSTALLED_VERSION="$(php${ver} -v 2>/dev/null | head -1 | awk '{print $2}')"
+            PHP_INSTALLED_VERSION="$(timeout 5s "php${ver}" -v 2>/dev/null | head -1 | awk '{print $2}' || true)"
             INSTALLED_TOOLS+=("PHP ${PHP_INSTALLED_VERSION}")
             break
         fi
     done
     # Fallback: generic php command
     if [[ -z "${PHP_INSTALLED}" ]] && command -v php &>/dev/null 2>&1; then
-        PHP_INSTALLED_VERSION="$(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+        PHP_INSTALLED_VERSION="$(timeout 5s php -v 2>/dev/null | head -1 | awk '{print $2}' || true)"
         PHP_INSTALLED="${PHP_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("PHP ${PHP_INSTALLED_VERSION}")
     fi
@@ -94,7 +95,7 @@ detect_installed() {
     POSTGRES_INSTALLED=""
     POSTGRES_INSTALLED_VERSION=""
     if command -v psql &>/dev/null 2>&1; then
-        POSTGRES_INSTALLED_VERSION="$(psql --version 2>/dev/null | awk '{print $3}')"
+        POSTGRES_INSTALLED_VERSION="$(timeout 5s psql --version 2>/dev/null | awk '{print $3}' || true)"
         POSTGRES_INSTALLED="${POSTGRES_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("PostgreSQL ${POSTGRES_INSTALLED_VERSION}")
     fi
@@ -103,7 +104,7 @@ detect_installed() {
     MARIADB_INSTALLED=""
     MARIADB_INSTALLED_VERSION=""
     if command -v mariadb &>/dev/null 2>&1; then
-        MARIADB_INSTALLED_VERSION="$(mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        MARIADB_INSTALLED_VERSION="$(timeout 5s mariadb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         MARIADB_INSTALLED="${MARIADB_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("MariaDB ${MARIADB_INSTALLED_VERSION}")
     fi
@@ -112,7 +113,7 @@ detect_installed() {
     MYSQL_INSTALLED=""
     MYSQL_INSTALLED_VERSION=""
     if command -v mysql &>/dev/null 2>&1 && [[ -z "${MARIADB_INSTALLED}" ]]; then
-        MYSQL_INSTALLED_VERSION="$(mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        MYSQL_INSTALLED_VERSION="$(timeout 5s mysql --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         MYSQL_INSTALLED="${MYSQL_INSTALLED_VERSION%%.*}"
         INSTALLED_TOOLS+=("MySQL ${MYSQL_INSTALLED_VERSION}")
     fi
@@ -121,7 +122,7 @@ detect_installed() {
     NGINX_INSTALLED=""
     NGINX_INSTALLED_VERSION=""
     if command -v nginx &>/dev/null 2>&1; then
-        NGINX_INSTALLED_VERSION="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        NGINX_INSTALLED_VERSION="$(timeout 5s nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         NGINX_INSTALLED="yes"
         INSTALLED_TOOLS+=("Nginx ${NGINX_INSTALLED_VERSION}")
     fi
@@ -129,7 +130,7 @@ detect_installed() {
     # ── Apache ──
     APACHE_INSTALLED=""
     if command -v apache2 &>/dev/null 2>&1; then
-        APACHE_INSTALLED_VERSION="$(apache2 -v 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        APACHE_INSTALLED_VERSION="$(timeout 5s apache2 -v 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
         APACHE_INSTALLED="yes"
         INSTALLED_TOOLS+=("Apache ${APACHE_INSTALLED_VERSION}")
     fi
@@ -138,7 +139,7 @@ detect_installed() {
     REDIS_INSTALLED=""
     REDIS_INSTALLED_VERSION=""
     if command -v redis-server &>/dev/null 2>&1; then
-        REDIS_INSTALLED_VERSION="$(redis-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        REDIS_INSTALLED_VERSION="$(timeout 5s redis-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         REDIS_INSTALLED="yes"
         INSTALLED_TOOLS+=("Redis ${REDIS_INSTALLED_VERSION}")
     fi
@@ -146,7 +147,7 @@ detect_installed() {
     # ── Memcached ──
     MEMCACHED_INSTALLED=""
     if command -v memcached &>/dev/null 2>&1; then
-        MEMCACHED_INSTALLED_VERSION="$(memcached --version 2>/dev/null | awk '{print $2}')"
+        MEMCACHED_INSTALLED_VERSION="$(timeout 5s memcached --version 2>/dev/null | awk '{print $2}' || true)"
         MEMCACHED_INSTALLED="yes"
         INSTALLED_TOOLS+=("Memcached ${MEMCACHED_INSTALLED_VERSION}")
     fi
@@ -155,7 +156,7 @@ detect_installed() {
     CERTBOT_INSTALLED=""
     CERTBOT_INSTALLED_VERSION=""
     if command -v certbot &>/dev/null 2>&1; then
-        CERTBOT_INSTALLED_VERSION="$(certbot --version 2>&1 | awk '{print $2}')"
+        CERTBOT_INSTALLED_VERSION="$(timeout 5s certbot --version 2>&1 | awk '{print $2}' || true)"
         CERTBOT_INSTALLED="yes"
         INSTALLED_TOOLS+=("Certbot ${CERTBOT_INSTALLED_VERSION}")
     fi
@@ -163,7 +164,8 @@ detect_installed() {
     # ── Composer ──
     COMPOSER_INSTALLED=""
     if command -v composer &>/dev/null 2>&1; then
-        COMPOSER_INSTALLED_VERSION="$(composer --version 2>/dev/null | awk '{print $3}')"
+        # Disable plugins/scripts here: third-party Composer plugins can prompt or hang.
+        COMPOSER_INSTALLED_VERSION="$(timeout 5s composer --version --no-plugins --no-scripts 2>/dev/null | awk '{print $3}' || true)"
         COMPOSER_INSTALLED="yes"
         INSTALLED_TOOLS+=("Composer ${COMPOSER_INSTALLED_VERSION}")
     fi
@@ -171,7 +173,7 @@ detect_installed() {
     # ── Git ──
     GIT_INSTALLED=""
     if command -v git &>/dev/null 2>&1; then
-        GIT_INSTALLED_VERSION="$(git --version 2>/dev/null | awk '{print $3}')"
+        GIT_INSTALLED_VERSION="$(timeout 5s git --version 2>/dev/null | awk '{print $3}' || true)"
         GIT_INSTALLED="yes"
         INSTALLED_TOOLS+=("Git ${GIT_INSTALLED_VERSION}")
     fi
@@ -179,7 +181,7 @@ detect_installed() {
     # ── rclone ──
     RCLONE_INSTALLED=""
     if command -v rclone &>/dev/null 2>&1; then
-        RCLONE_INSTALLED_VERSION="$(rclone --version 2>/dev/null | head -1 | awk '{print $2}')"
+        RCLONE_INSTALLED_VERSION="$(timeout 5s rclone --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
         RCLONE_INSTALLED="yes"
         INSTALLED_TOOLS+=("rclone ${RCLONE_INSTALLED_VERSION}")
     fi

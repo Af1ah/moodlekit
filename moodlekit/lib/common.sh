@@ -123,6 +123,7 @@ section() {
 
 step() {
     local num="$1"; local total="$2"; local msg="$3"
+    _CURRENT_STEP="[${num}/${total}] ${msg}"
     echo -e "\n${C_BOLD_CYAN}[${num}/${total}]${C_RESET} ${C_BOLD}${msg}${C_RESET}"
     log_raw "[${num}/${total}] ${msg}"
 }
@@ -167,12 +168,25 @@ clear_rollbacks() {
 _err_handler() {
     local exit_code=$?
     local line_no="${1:-unknown}"
-    err "Command failed at line ${line_no} (exit code: ${exit_code})"
+    if [[ -n "${_CURRENT_STEP:-}" ]]; then
+        err "Failed during ${_CURRENT_STEP} (line ${line_no}, exit code ${exit_code})."
+    else
+        err "Command failed at line ${line_no} (exit code: ${exit_code})."
+    fi
     [[ -n "${_LOG_FILE}" ]] && err "Full log: ${_LOG_FILE}"
     run_rollbacks
     exit "${exit_code}"
 }
 trap '_err_handler ${LINENO}' ERR
+
+_interrupt_handler() {
+    echo "" >&2
+    warn "Operation interrupted by user. Cleaning up incomplete changes..."
+    [[ -n "${_LOG_FILE:-}" ]] && warn "Partial-operation log: ${_LOG_FILE}"
+    run_rollbacks
+    exit 130
+}
+trap '_interrupt_handler' INT TERM
 
 # ---------------------------------------------------------------------------
 # Root check

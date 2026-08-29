@@ -15,6 +15,22 @@ cmd_backup_site() {
     site_exists "${SLUG}" || { err "Site '${SLUG}' not found"; exit 1; }
     load_site_conf "${SLUG}"
 
+    # A failed/interrupted provisioning run can leave a vault record with
+    # missing credentials. Never call a database client with empty arguments.
+    local missing=()
+    [[ -z "${DB_TYPE:-}" ]] && missing+=("database type")
+    [[ -z "${DB_NAME:-}" ]] && missing+=("database name")
+    [[ -z "${DB_USER:-}" ]] && missing+=("database user")
+    [[ -z "${MOODLE_DIR:-}" ]] && missing+=("Moodle directory")
+    [[ -z "${MOODLEDATA_DIR:-}" ]] && missing+=("moodledata directory")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        err "Cannot back up '${SLUG}': its saved site record is incomplete."
+        err "Missing: ${missing[*]}"
+        err "This normally means site creation stopped before registration completed."
+        err "Run 'moodlekit doctor ${SLUG}' to inspect it, or remove it without a backup."
+        return 1
+    fi
+
     require_root
     init_logging "backup-${SLUG}"
 
@@ -39,6 +55,10 @@ cmd_backup_site() {
         postgres) db_pg_dump    "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${dump_file}" ;;
         mariadb)  db_maria_dump "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${dump_file}" ;;
         mysql)    db_mysql_dump "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${dump_file}" ;;
+        *)
+            err "Cannot back up '${SLUG}': unsupported database type '${DB_TYPE}'."
+            return 1
+            ;;
     esac
 
     # ─────────────────────────────────────────────────────────────────────────

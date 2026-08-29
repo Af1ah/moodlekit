@@ -327,10 +327,26 @@ cmd_site_create() {
 
     # Calculate workers based on number of existing sites
     local num_sites
-    num_sites="$(find "${MOODLEKIT_SITES_DIR}" -name '*.conf' -type f 2>/dev/null | wc -l)"
+    num_sites=0
+    if [[ -d "${MOODLEKIT_SITES_DIR}" ]]; then
+        num_sites="$(find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null | wc -l)"
+    fi
     num_sites=$(( num_sites + 1 ))  # include this new site
 
+    info "Sizing PHP-FPM for ${num_sites} managed site(s)..."
     calculate_tuning "balanced" "${num_sites}" "${DB_TYPE}"
+
+    if [[ ! -d "/etc/php/${PHP_VERSION}/fpm/pool.d" ]]; then
+        err "PHP-FPM ${PHP_VERSION} is not installed or its pool directory is missing."
+        err "Expected: /etc/php/${PHP_VERSION}/fpm/pool.d"
+        err "Run 'moodlekit doctor' or re-run bootstrap before creating the site."
+        return 1
+    fi
+    if ! systemctl list-unit-files "php${PHP_VERSION}-fpm.service" --no-legend 2>/dev/null | grep -q .; then
+        err "PHP-FPM service php${PHP_VERSION}-fpm.service was not found."
+        err "Run 'moodlekit doctor' or re-run bootstrap before creating the site."
+        return 1
+    fi
 
     render_template_to_file "${MOODLEKIT_TPL}/fpm-pool.conf.tpl" "${FPM_POOL_CONF}" \
         "SLUG=${SLUG}" \

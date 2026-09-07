@@ -99,21 +99,52 @@ select_one() {
 # ---------------------------------------------------------------------------
 # Multi-select menu (checkboxes)
 # Usage: select_many RESULT_ARRAY "Prompt" option1 option2 ...
-# Sets RESULT_ARRAY to array of selected options
+# Usage: select_many_preselected RESULT_ARRAY DEFAULTS_ARRAY "Prompt" option1 option2 ...
+# Sets RESULT_ARRAY to array of selected options. The preselected variant checks
+# all values present in DEFAULTS_ARRAY before drawing the menu.
 # ---------------------------------------------------------------------------
 select_many() {
+    local result_name="$1"; shift
+    local prompt="$1"; shift
+    local -a defaults=()
+    _select_many_impl "${result_name}" defaults "${prompt}" "$@"
+}
+
+select_many_preselected() {
+    local result_name="$1"; shift
+    local defaults_name="$1"; shift
+    local prompt="$1"; shift
+    _select_many_impl "${result_name}" "${defaults_name}" "${prompt}" "$@"
+}
+
+_select_many_impl() {
     local -n _result_arr="$1"; shift
+    local -n _defaults_arr="$1"; shift
     local prompt="$1"; shift
     local options=("$@")
     local num="${#options[@]}"
     local selected=0
     local checked=()
-    for (( i=0; i<num; i++ )); do checked+=( 0 ); done
-    # Default: check first item
-    checked[0]=1
+    local option default_value
+    for (( i=0; i<num; i++ )); do
+        checked+=( 0 )
+        option="${options[$i]}"
+        for default_value in "${_defaults_arr[@]}"; do
+            if [[ "${option}" == "${default_value}" ]]; then
+                checked[$i]=1
+                break
+            fi
+        done
+    done
+    # Preserve the original behavior when no saved defaults were supplied.
+    [[ ${#_defaults_arr[@]} -gt 0 ]] || checked[0]=1
 
     if ! is_interactive; then
-        _result_arr=("${options[0]}")
+        if [[ ${#_defaults_arr[@]} -gt 0 ]]; then
+            _result_arr=("${_defaults_arr[@]}")
+        else
+            _result_arr=("${options[0]}")
+        fi
         return 0
     fi
 
@@ -241,7 +272,7 @@ input_text() {
     local regex="${3:-}"
     local err_msg="${4:-Invalid input. Try again.}"
 
-    if [[ "${MOODLEKIT_YES:-0}" == "1" ]] && [[ -n "${default}" ]]; then
+    if [[ "${MOODLEKIT_YES:-0}" == "1" ]]; then
         _text_ref="${default}"
         return 0
     fi

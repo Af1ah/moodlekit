@@ -14,6 +14,9 @@ listen = {{FPM_SOCK}}
 listen.owner = www-data
 listen.group = www-data
 listen.mode  = 0660
+; Queue short traffic bursts instead of immediately refusing connections while
+; all workers are busy. The worker cap still protects host memory.
+listen.backlog = 1024
 
 ; ── Process manager — dynamic ─────────────────────────────────────────────────
 pm                   = dynamic

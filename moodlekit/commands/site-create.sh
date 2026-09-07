@@ -59,6 +59,14 @@ cmd_site_create() {
     else
         input_text DOMAIN "Enter the full domain for this site" "${default_domain}" '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' "Invalid domain format"
     fi
+    validate_domain "${DOMAIN}"
+    local domain_owner=""
+    domain_owner="$(site_slug_for_domain "${DOMAIN}" || true)"
+    if [[ -n "${domain_owner}" && "${domain_owner}" != "${SLUG}" ]]; then
+        err "Domain '${DOMAIN}' is already assigned to managed site '${domain_owner}'."
+        err "Choose a different domain before provisioning '${SLUG}'."
+        return 1
+    fi
 
     # Initialize skip flags from CLI options
     local SKIP_DNS="${OPT_SKIP_DNS:-0}"
@@ -157,6 +165,7 @@ cmd_site_create() {
         exit 0
     fi
     echo ""
+    state_operation_start "site-create" "${SLUG}" "$(jq -nc --arg domain "${DOMAIN}" --arg version "${MOODLE_VERSION}" '{domain:$domain,moodle_version:$version}')"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 1/12 — Validate + conflict check
@@ -319,9 +328,7 @@ cmd_site_create() {
     step 5 12 "Set permissions"
 
     # Moodle code: root:www-data, not writable by web server
-    chown -R root:www-data "${MOODLE_DIR}"
-    find "${MOODLE_DIR}" -type d -exec chmod 755 {} \;
-    find "${MOODLE_DIR}" -type f -exec chmod 644 {} \;
+    normalize_moodle_code_permissions "${MOODLE_DIR}"
 
     # moodledata: fully writable by www-data
     mkdir -p "${MOODLEDATA_DIR}"
@@ -364,6 +371,26 @@ cmd_site_create() {
 
     info "Sizing PHP-FPM for ${num_sites} managed site(s)..."
     calculate_tuning "balanced" "${num_sites}" "${DB_TYPE}"
+    info "Measured worker model: ${TUNE_FPM_WORKER_MEMORY_MB}MB reserved per worker (${TUNE_FPM_MEMORY_SOURCE})"
+    info "Recommended pool: max_children=${TUNE_FPM_MAX_CHILDREN}; server safety cap=${TUNE_FPM_WORKER_CAP}"
+
+    if is_interactive; then
+        local fpm_size_choice=""
+        select_one fpm_size_choice "Choose PHP-FPM pool sizing for '${SLUG}':" \
+            "Use recommended ${TUNE_FPM_MAX_CHILDREN} workers (Recommended)" \
+            "Choose a custom worker count (2-${TUNE_FPM_WORKER_CAP})"
+        if [[ "${fpm_size_choice}" == *"custom"* ]]; then
+            local custom_workers="${TUNE_FPM_MAX_CHILDREN}"
+            while true; do
+                input_text custom_workers \
+                    "Maximum PHP-FPM workers for this site (2-${TUNE_FPM_WORKER_CAP})" \
+                    "${TUNE_FPM_MAX_CHILDREN}" '^[0-9]+$' "Enter a whole number"
+                if set_fpm_pool_workers "${custom_workers}"; then
+                    break
+                fi
+            done
+        fi
+    fi
 
     if [[ ! -d "/etc/php/${PHP_VERSION}/fpm/pool.d" ]]; then
         err "PHP-FPM ${PHP_VERSION} is not installed or its pool directory is missing."
@@ -627,7 +654,9 @@ CONFADD
 
     # MUC Redis setup — create store instance programmatically
     if [[ "${USE_REDIS:-0}" == "1" ]]; then
-        _configure_muc_redis "${SLUG}" "${MOODLE_DIR}" "${IS_MOODLE5}"
+        if ! _configure_muc_redis "${SLUG}" "${MOODLE_DIR}" "${IS_MOODLE5}"; then
+            warn "Site installation is usable, but Redis MUC mapping needs manual review."
+        fi
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -695,6 +724,7 @@ CONFADD
         }'
     )"
     vault_sset "${SLUG}" "${site_json}"
+    state_site_upsert "${site_json}"
 
     # Legacy config compatibility
     mkdir -p "${MOODLEKIT_SITES_DIR}"
@@ -724,7 +754,9 @@ CREATED_AT="$(date -Iseconds)"
 SITECONF
     chmod 600 "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
 
+    release_lock
     clear_rollbacks
+    state_operation_finish "completed" "Site creation completed"
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -752,9 +784,10 @@ SITECONF
 _configure_cron() {
     local slug="$1"
     local moodle_dir="$2"
-    local is_moodle5="${3:-0}"
 
-    local cron_php="${moodle_dir}/admin/cli/cron.php"
+    local admin_cli
+    admin_cli="$(find_moodle_admin_cli "${moodle_dir}")"
+    local cron_php="${admin_cli}/cron.php"
 
     if [[ ! -f "${cron_php}" ]]; then
         err "Moodle cron.php not found: ${cron_php}"
@@ -762,14 +795,18 @@ _configure_cron() {
     fi
 
     # Calculate stagger offset: 12 seconds per existing site
-    local existing
-    existing="$(find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null | wc -l)"
+    local existing=0
+    if [[ -d "${MOODLEKIT_SITES_DIR}" ]]; then
+        existing="$(find "${MOODLEKIT_SITES_DIR}" -maxdepth 1 -name '*.conf' -type f 2>/dev/null | wc -l)"
+    fi
     local offset=$(( (existing * 12) % 60 ))
 
     # Lock file uses SLUG (not SITE_SLUG — BUG FIX from reference scripts)
     local lock_file="/tmp/moodlekit-${slug}.lock"
 
-    cat > "/etc/cron.d/moodlekit-${slug}" << CRONFILE
+    local cron_file="/etc/cron.d/moodlekit-${slug}"
+    mkdir -p /var/log/moodlekit
+    cat > "${cron_file}" << CRONFILE
 # MoodleKit cron — ${slug} — stagger offset: ${offset}s
 # Generated: $(date)
 SHELL=/bin/bash
@@ -777,9 +814,18 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
 * * * * * www-data sleep ${offset} && flock -n ${lock_file} /usr/bin/php${PHP_VERSION} ${cron_php} >> /var/log/moodlekit/${slug}-cron.log 2>&1
 CRONFILE
-    chmod 644 "/etc/cron.d/moodlekit-${slug}"
-    register_rollback "rm -f '/etc/cron.d/moodlekit-${slug}'"
-    ok "Cron configured (offset: ${offset}s, lock: ${lock_file})"
+    chmod 644 "${cron_file}"
+    register_rollback "rm -f '${cron_file}'"
+
+    if [[ ! -s "${cron_file}" ]] || ! grep -Fq "${cron_php}" "${cron_file}"; then
+        err "Cron verification failed: ${cron_file} was not written correctly."
+        return 1
+    fi
+    systemctl enable --now cron >/dev/null 2>&1 || {
+        err "Cron file was created, but the cron service could not be started."
+        return 1
+    }
+    ok "Cron configured and verified: ${cron_file} (offset: ${offset}s)"
 }
 
 # ---------------------------------------------------------------------------
@@ -789,8 +835,6 @@ _configure_muc_redis() {
     local slug="$1"
     local moodle_dir="$2"
     local is_moodle5="${3:-0}"
-
-    local php_script="${moodle_dir}/admin/cli"
 
     # Create a temporary PHP script to set up Redis MUC store
     local muc_script
@@ -827,14 +871,30 @@ if (isset(\$stores[\$instance_name])) {
 ];
 
 // Add the store instance
-cache_config_writer::add_store_instance(\$instance_name, 'redis', \$store_config);
+\$writer = cache_config_writer::instance();
+\$writer->add_store_instance(\$instance_name, 'redis', \$store_config);
 mtrace("Redis MUC store '{\$instance_name}' created.");
 mtrace("To map it: Site Admin → Plugins → Caching → Configuration → Edit Mappings");
 MUCPHP
 
+    # mktemp creates a root-only 0600 file. Moodle runs as www-data, so grant
+    # that group read access while keeping the generated script non-writable.
+    chown root:www-data "${muc_script}"
+    chmod 640 "${muc_script}"
+
+    set +e
     sudo -u www-data "/usr/bin/php${PHP_VERSION}" "${muc_script}" 2>&1 \
-        | tee -a "${_LOG_FILE}" || warn "MUC Redis store setup failed — configure manually in admin"
+        | tee -a "${_LOG_FILE}"
+    local muc_exit="${PIPESTATUS[0]}"
+    set -e
     rm -f "${muc_script}"
+
+    if [[ "${muc_exit}" -ne 0 ]]; then
+        warn "MUC Redis store setup failed (exit ${muc_exit}) — configure manually in admin"
+        return "${muc_exit}"
+    fi
+    ok "Redis MUC store configured"
+    return 0
 }
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,10 @@ cmd_backup_site() {
     fi
 
     require_root
+    # Backups contain the database and recovery configuration, including
+    # credentials. Ensure every directory and newly-created artifact is
+    # root-only regardless of the invoking shell's umask.
+    umask 077
     init_logging "backup-${SLUG}"
 
     local TIMESTAMP
@@ -226,8 +230,14 @@ cmd_backup_select_sites() {
     fi
 
     local -a selected_sites=()
+    local -a configured_sites=()
+    if [[ -f "${OPT_DIR}/config.json" ]]; then
+        mapfile -t configured_sites < <(jq -r '.moodle_sites[]?' "${OPT_DIR}/config.json" 2>/dev/null)
+    fi
     info "Select which Moodle sites to include in automated cloud backups:"
-    select_many selected_sites "Choose sites to back up (Space to toggle, Enter to confirm):" "${candidate_sites[@]}"
+    select_many_preselected selected_sites configured_sites \
+        "Choose sites to back up (current selections are already checked):" \
+        "${candidate_sites[@]}"
 
     if [[ ${#selected_sites[@]} -eq 0 ]]; then
         warn "No sites selected. Keeping previous configuration."
@@ -267,6 +277,145 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Deploy Python cloud backup + systemd timer
 # ---------------------------------------------------------------------------
+_retire_legacy_cloud_backup() {
+    local legacy_dir="${MOODLEKIT_LEGACY_BACKUP_DIR:-/opt/moodle_backup}"
+    local systemd_dir="${MOODLEKIT_SYSTEMD_DIR:-/etc/systemd/system}"
+    local legacy_service="${systemd_dir}/moodle-backup.service"
+    local legacy_timer="${systemd_dir}/moodle-backup.timer"
+
+    if [[ ! -e "${legacy_dir}" && ! -e "${legacy_service}" && ! -e "${legacy_timer}" ]]; then
+        return 0
+    fi
+
+    warn "Legacy Moodle backup installation detected; retiring it before enabling MoodleKit Cloud Backup."
+
+    # Stop the scheduler first so it cannot launch the legacy service while its
+    # files are being archived. A failed/inactive unit is harmless here.
+    systemctl disable --now moodle-backup.timer &>> "${_LOG_FILE}" || true
+    systemctl stop moodle-backup.service &>> "${_LOG_FILE}" || true
+
+    local archive_dir="${MOODLEKIT_BACKUP_DIR}/legacy-cloud-backup-$(date +%Y%m%d_%H%M%S)"
+    install -d -m 700 "${archive_dir}"
+
+    if [[ -e "${legacy_dir}" ]]; then
+        mv "${legacy_dir}" "${archive_dir}/moodle_backup"
+    fi
+    if [[ -e "${legacy_service}" ]]; then
+        mv "${legacy_service}" "${archive_dir}/moodle-backup.service"
+    fi
+    if [[ -e "${legacy_timer}" ]]; then
+        mv "${legacy_timer}" "${archive_dir}/moodle-backup.timer"
+    fi
+
+    systemctl daemon-reload
+    systemctl reset-failed moodle-backup.service moodle-backup.timer &>> "${_LOG_FILE}" || true
+
+    ok "Legacy backup scheduler disabled and its files preserved at ${archive_dir}"
+}
+
+_cloud_backup_schedule() {
+    local timer_path="${MOODLEKIT_SYSTEMD_DIR:-/etc/systemd/system}/moodlekit-backup.timer"
+    local schedule=""
+    if [[ -f "${timer_path}" ]]; then
+        schedule="$(sed -n 's/^OnCalendar=.* \([0-9][0-9]:[0-9][0-9]\):[0-9][0-9]$/\1/p' "${timer_path}" | head -1)"
+    fi
+    printf '%s' "${schedule:-02:00}"
+}
+
+_install_cloud_backup_units() {
+    local backup_time="$1"
+    local server_tz="$2"
+    local systemd_dir="${MOODLEKIT_SYSTEMD_DIR:-/etc/systemd/system}"
+
+    _retire_legacy_cloud_backup
+    cp "${MOODLEKIT_TPL}/systemd-backup.service" \
+       "${systemd_dir}/moodlekit-backup.service"
+
+    cat > "${systemd_dir}/moodlekit-backup.timer" << TIMERF
+[Unit]
+Description=Run MoodleKit cloud backup daily at ${backup_time} (${server_tz})
+
+[Timer]
+OnCalendar=*-*-* ${backup_time}:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMERF
+
+    systemctl daemon-reload
+    systemctl enable --now moodlekit-backup.timer
+}
+
+_show_existing_cloud_backup() {
+    local opt_dir="$1"
+    local sites remote telegram timer_state service_state
+    sites="$(jq -r '[.moodle_sites[]?] | if length == 0 then "(none)" else join(", ") end' "${opt_dir}/config.json" 2>/dev/null || echo '(unreadable)')"
+    remote="$(jq -r '.gdrive_remote // "(not configured)"' "${opt_dir}/config.json" 2>/dev/null || echo '(unreadable)')"
+    telegram="not configured"
+    if [[ -f "${opt_dir}/secrets.json" ]] && jq -e '.telegram_bot_token // "" | select(length > 0 and . != "YOUR_BOT_TOKEN_HERE")' "${opt_dir}/secrets.json" &>/dev/null; then
+        telegram="configured"
+    fi
+    timer_state="$(systemctl is-enabled moodlekit-backup.timer 2>/dev/null || true)"
+    service_state="$(systemctl is-active moodlekit-backup.service 2>/dev/null || true)"
+    timer_state="${timer_state:-disabled}"
+    service_state="${service_state:-inactive}"
+
+    print_box "Existing Cloud Backup Setup" \
+        "Schedule:  Daily at $(_cloud_backup_schedule) ($(get_system_timezone))" \
+        "Sites:     ${sites}" \
+        "Remote:    ${remote}" \
+        "Telegram:  ${telegram}" \
+        "Timer:     ${timer_state}" \
+        "Service:   ${service_state}"
+}
+
+_change_cloud_backup_schedule() {
+    local current_time server_tz time_choice backup_time
+    current_time="$(_cloud_backup_schedule)"
+    server_tz="$(get_system_timezone)"
+    backup_time="${current_time}"
+
+    select_one time_choice "Select daily backup schedule (Current: ${current_time}, ${server_tz}):" \
+        "Keep current time (${current_time})" \
+        "01:00 AM (01:00)" \
+        "02:00 AM (02:00)" \
+        "03:00 AM (03:00)" \
+        "04:00 AM (04:00)" \
+        "11:00 PM (23:00)" \
+        "12:00 AM (00:00 - Midnight)" \
+        "Custom Time (enter HH:MM in 24h format)"
+
+    case "${time_choice}" in
+        *"Keep current"*) return 0 ;;
+        *"01:00 AM"*) backup_time="01:00" ;;
+        *"02:00 AM"*) backup_time="02:00" ;;
+        *"03:00 AM"*) backup_time="03:00" ;;
+        *"04:00 AM"*) backup_time="04:00" ;;
+        *"11:00 PM"*) backup_time="23:00" ;;
+        *"12:00 AM"*) backup_time="00:00" ;;
+        *"Custom Time"*)
+            input_text backup_time "Enter time in 24h format HH:MM (e.g. 02:30)" "${current_time}" '^([01][0-9]|2[0-3]):[0-5][0-9]$' "Must be valid 24h time in HH:MM format"
+            ;;
+    esac
+
+    _install_cloud_backup_units "${backup_time}" "${server_tz}"
+    ok "Backup schedule updated to daily at ${backup_time} (${server_tz})"
+}
+
+_repair_existing_cloud_backup() {
+    local opt_dir="$1"
+    local src_py="${MOODLEKIT_ROOT}/backup/moodle_backup.py"
+    local backup_time="$(_cloud_backup_schedule)"
+    local server_tz="$(get_system_timezone)"
+
+    cp "${src_py}" "${opt_dir}/moodle_backup.py"
+    chmod 750 "${opt_dir}/moodle_backup.py"
+    _install_cloud_backup_units "${backup_time}" "${server_tz}"
+    ok "Existing cloud backup service repaired without changing its configuration."
+}
+
 cmd_backup_deploy() {
     require_root
     load_global_conf 0 || true
@@ -277,6 +426,45 @@ cmd_backup_deploy() {
     local OPT_DIR="${MOODLEKIT_OPT_DIR}/backup"
     mkdir -p "${OPT_DIR}"
 
+    if [[ -f "${OPT_DIR}/config.json" ]]; then
+        _show_existing_cloud_backup "${OPT_DIR}"
+
+        if ! is_interactive; then
+            _repair_existing_cloud_backup "${OPT_DIR}"
+            return 0
+        fi
+
+        local existing_action=""
+        select_one existing_action "Cloud Backup is already configured. What would you like to change?" \
+            "Keep existing setup (Recommended)" \
+            "Change backup schedule" \
+            "Change selected Moodle sites" \
+            "Repair / redeploy service files" \
+            "Run complete setup wizard again"
+
+        case "${existing_action}" in
+            *"Keep existing"*)
+                ok "Existing cloud backup setup kept unchanged."
+                return 0
+                ;;
+            *"Change backup schedule"*)
+                _change_cloud_backup_schedule
+                return 0
+                ;;
+            *"Change selected Moodle sites"*)
+                cmd_backup_select_sites
+                return 0
+                ;;
+            *"Repair / redeploy"*)
+                _repair_existing_cloud_backup "${OPT_DIR}"
+                return 0
+                ;;
+            *"Run complete setup"*)
+                warn "Starting the complete setup wizard; saved configuration will be used where possible."
+                ;;
+        esac
+    fi
+
     # ─────────────────────────────────────────────────────────────────────────
     # Step 1 — Timezone & Schedule Selection
     # ─────────────────────────────────────────────────────────────────────────
@@ -285,10 +473,11 @@ cmd_backup_deploy() {
     local server_tz
     server_tz="$(get_system_timezone)"
     
-    local backup_time="02:00"
+    local backup_time="$(_cloud_backup_schedule)"
     if is_interactive; then
         local time_choice=""
         select_one time_choice "Select daily backup schedule time (Current timezone: ${server_tz}):" \
+            "Keep current time (${backup_time})" \
             "02:00 AM (02:00) [Recommended - Lowest server traffic]" \
             "01:00 AM (01:00)" \
             "03:00 AM (03:00)" \
@@ -298,6 +487,7 @@ cmd_backup_deploy() {
             "Custom Time (enter HH:MM in 24h format)"
 
         case "${time_choice}" in
+            *"Keep current"*) ;;
             *"02:00 AM"*) backup_time="02:00" ;;
             *"01:00 AM"*) backup_time="01:00" ;;
             *"03:00 AM"*) backup_time="03:00" ;;
@@ -336,13 +526,23 @@ cmd_backup_deploy() {
     done < <(find_moodle_installations 2>/dev/null)
 
     local -a selected_sites=()
+    local -a configured_sites=()
+    if [[ -f "${OPT_DIR}/config.json" ]]; then
+        mapfile -t configured_sites < <(jq -r '.moodle_sites[]?' "${OPT_DIR}/config.json" 2>/dev/null)
+    fi
     if [[ ${#candidate_sites[@]} -gt 0 ]]; then
         if is_interactive; then
             echo ""
             info "Select which Moodle sites to include in automated cloud backups:"
-            select_many selected_sites "Choose sites to back up (Space to toggle, Enter to confirm):" "${candidate_sites[@]}"
+            select_many_preselected selected_sites configured_sites \
+                "Choose sites to back up (current selections are already checked):" \
+                "${candidate_sites[@]}"
         else
-            selected_sites=("${candidate_sites[@]}")
+            if [[ ${#configured_sites[@]} -gt 0 ]]; then
+                selected_sites=("${configured_sites[@]}")
+            else
+                selected_sites=("${candidate_sites[@]}")
+            fi
         fi
     fi
 
@@ -435,24 +635,7 @@ SECRETJSON
     # Step 4 — Install systemd service + customized timer
     # ─────────────────────────────────────────────────────────────────────────
     step 4 6 "Install systemd service + timer"
-    cp "${MOODLEKIT_TPL}/systemd-backup.service" \
-       /etc/systemd/system/moodlekit-backup.service
-
-    cat > /etc/systemd/system/moodlekit-backup.timer << TIMERF
-[Unit]
-Description=Run MoodleKit cloud backup daily at ${backup_time} (${server_tz})
-
-[Timer]
-OnCalendar=*-*-* ${backup_time}:00
-RandomizedDelaySec=300
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-TIMERF
-
-    systemctl daemon-reload
-    systemctl enable --now moodlekit-backup.timer
+    _install_cloud_backup_units "${backup_time}" "${server_tz}"
     ok "Timer active: Daily at ${backup_time} (${server_tz}) + up to 5min jitter"
 
     # ─────────────────────────────────────────────────────────────────────────

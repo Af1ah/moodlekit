@@ -11,7 +11,10 @@
 [[ -n "${_MOODLEKIT_COMMON_LOADED:-}" ]] && return 0
 _MOODLEKIT_COMMON_LOADED=1
 
-set -euo pipefail
+# ERR traps must propagate into command functions. Without errtrace, a failure
+# several functions deep can terminate the CLI before the registered rollback
+# stack and operation journal are updated.
+set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
 # Paths & version
@@ -31,6 +34,7 @@ MOODLEKIT_TPL="${MOODLEKIT_ROOT}/templates"
 
 # shellcheck source=lib/vault.sh
 [[ -f "${MOODLEKIT_LIB}/vault.sh" ]] && source "${MOODLEKIT_LIB}/vault.sh"
+[[ -f "${MOODLEKIT_LIB}/state.sh" ]] && source "${MOODLEKIT_LIB}/state.sh"
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +130,9 @@ step() {
     _CURRENT_STEP="[${num}/${total}] ${msg}"
     echo -e "\n${C_BOLD_CYAN}[${num}/${total}]${C_RESET} ${C_BOLD}${msg}${C_RESET}"
     log_raw "[${num}/${total}] ${msg}"
+    if type state_operation_step &>/dev/null; then
+        state_operation_step "${num}/${total} ${msg}" "running"
+    fi
 }
 
 verbose() {
@@ -178,6 +185,9 @@ _err_handler() {
     fi
     [[ -n "${_LOG_FILE}" ]] && err "Full log: ${_LOG_FILE}"
     run_rollbacks
+    if type state_operation_finish &>/dev/null; then
+        state_operation_finish "failed" "Failed at line ${line_no} with exit code ${exit_code}"
+    fi
     exit "${exit_code}"
 }
 trap '_err_handler ${LINENO}' ERR
@@ -190,6 +200,9 @@ _interrupt_handler() {
     warn "Operation interrupted by user. Cleaning up incomplete changes..."
     [[ -n "${_LOG_FILE:-}" ]] && warn "Partial-operation log: ${_LOG_FILE}"
     run_rollbacks
+    if type state_operation_finish &>/dev/null; then
+        state_operation_finish "cancelled" "Interrupted by user"
+    fi
     exit 130
 }
 trap '_interrupt_handler' INT TERM
@@ -238,6 +251,26 @@ gen_password() {
 gen_password_alnum() {
     local length="${1:-24}"
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "${length}"
+}
+
+# Apply production ownership/modes without making a Git checkout dirty.
+# Moodle includes a small number of tracked executable files; a blanket 0644
+# pass strips those mode bits and causes every later upgrade to be rejected.
+normalize_moodle_code_permissions() {
+    local moodle_dir="$1"
+    chown -R root:www-data "${moodle_dir}"
+    find "${moodle_dir}" -type d -exec chmod 755 {} +
+    find "${moodle_dir}" -type f -exec chmod 644 {} +
+
+    if [[ -d "${moodle_dir}/.git" ]] && command -v git &>/dev/null; then
+        local entry mode path
+        while IFS= read -r -d '' entry; do
+            mode="${entry%% *}"
+            path="${entry#*$'\t'}"
+            [[ "${mode}" == "100755" ]] || continue
+            [[ -f "${moodle_dir}/${path}" ]] && chmod 755 "${moodle_dir}/${path}"
+        done < <(git -C "${moodle_dir}" ls-files --stage -z)
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -581,12 +614,14 @@ load_site_conf() {
     local slug="$1"
     local required="${2:-1}"
     if type vault_load_site &>/dev/null && vault_load_site "${slug}"; then
+        cache_current_site_state "${slug}"
         return 0
     fi
     local conf="${MOODLEKIT_SITES_DIR}/${slug}.conf"
     if [[ -f "${conf}" ]]; then
         # shellcheck source=/dev/null
         source "${conf}"
+        cache_current_site_state "${slug}"
         return 0
     fi
 
@@ -641,6 +676,7 @@ load_site_conf() {
             export SITE_TYPE="standalone"
             export NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
             export FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
+            cache_current_site_state "${slug}"
             return 0
         fi
     fi
@@ -668,6 +704,24 @@ load_site_conf() {
     export NGINX_CONF="/etc/nginx/sites-available/moodle-${slug}"
     export FPM_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/moodle_${slug}.conf"
     return 0
+}
+
+cache_current_site_state() {
+    local slug="$1"
+    type state_site_upsert &>/dev/null || return 0
+    local cache_json
+    cache_json="$(jq -nc \
+        --arg slug "${slug}" \
+        --arg domain "${DOMAIN:-}" \
+        --arg moodle_dir "${MOODLE_DIR:-}" \
+        --arg moodledata_dir "${MOODLEDATA_DIR:-}" \
+        --arg db_type "${DB_TYPE:-}" \
+        --arg db_name "${DB_NAME:-}" \
+        --arg php_version "${PHP_VERSION:-}" \
+        --arg moodle_version "${MOODLE_VERSION:-}" \
+        --argjson is_moodle5 "${IS_MOODLE5:-0}" \
+        '{slug:$slug,domain:$domain,moodle_dir:$moodle_dir,moodledata_dir:$moodledata_dir,db_type:$db_type,db_name:$db_name,php_version:$php_version,moodle_version:$moodle_version,is_moodle5:$is_moodle5}')"
+    state_site_upsert "${cache_json}"
 }
 
 list_site_slugs() {
@@ -781,6 +835,31 @@ validate_slug() {
     fi
 }
 
+validate_domain() {
+    local domain="$1"
+    if (( ${#domain} > 253 )) || \
+       [[ ! "${domain}" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+        err "Invalid domain '${domain}'."
+        err "Use a hostname only (for example lms.example.com or lms.local); URLs, ports, spaces, and malformed labels are not allowed."
+        return 1
+    fi
+}
+
+site_slug_for_domain() {
+    local wanted="$1" slug site_json stored_domain
+    while IFS= read -r slug; do
+        [[ -n "${slug}" ]] || continue
+        site_json="$(vault_sget "${slug}" 2>/dev/null || true)"
+        [[ -n "${site_json}" ]] || continue
+        stored_domain="$(jq -r '.domain // empty' <<< "${site_json}" 2>/dev/null || true)"
+        if [[ "${stored_domain,,}" == "${wanted,,}" ]]; then
+            echo "${slug}"
+            return 0
+        fi
+    done < <(list_site_slugs 2>/dev/null)
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Service management helpers
 # ---------------------------------------------------------------------------
@@ -858,6 +937,82 @@ check_disk_space() {
         return 1
     fi
     verbose "Disk space OK at ${path}: ${avail_gb}GB available"
+}
+
+# ---------------------------------------------------------------------------
+# Site-operation safety helpers
+# ---------------------------------------------------------------------------
+validate_site_runtime() {
+    local slug="$1"
+    local missing=()
+    [[ -n "${MOODLE_DIR:-}" ]] || missing+=("Moodle directory")
+    [[ -n "${MOODLEDATA_DIR:-}" ]] || missing+=("moodledata directory")
+    [[ -n "${DB_TYPE:-}" ]] || missing+=("database type")
+    [[ -n "${DB_NAME:-}" ]] || missing+=("database name")
+    [[ -n "${DB_USER:-}" ]] || missing+=("database user")
+    [[ -n "${PHP_VERSION:-}" ]] || missing+=("PHP version")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        err "Cannot safely operate on '${slug}': required site state is incomplete."
+        err "Missing: ${missing[*]}"
+        return 1
+    fi
+    case "${DB_TYPE}" in
+        postgres|mariadb|mysql) ;;
+        *) err "Unsupported database type '${DB_TYPE}' for '${slug}'."; return 1 ;;
+    esac
+    [[ "${DB_NAME}" =~ ^[a-zA-Z0-9_]+$ ]] || { err "Unsafe database name in site state: ${DB_NAME}"; return 1; }
+    [[ "${DB_USER}" =~ ^[a-zA-Z0-9_]+$ ]] || { err "Unsafe database user in site state: ${DB_USER}"; return 1; }
+    [[ -d "${MOODLE_DIR}" ]] || { err "Moodle directory does not exist: ${MOODLE_DIR}"; return 1; }
+    [[ -x "/usr/bin/php${PHP_VERSION}" ]] || { err "PHP CLI not found: /usr/bin/php${PHP_VERSION}"; return 1; }
+}
+
+validate_backup_bundle() {
+    local backup_path="$1"
+    local output
+    if ! output="$(python3 "${MOODLEKIT_LIB}/safety.py" validate-backup "${backup_path}" 2>&1)"; then
+        err "${output}"
+        err "Restore stopped before changing the database or filesystem."
+        return 1
+    fi
+    info "Backup integrity and archive paths verified."
+    verbose "Backup validation: ${output}"
+}
+
+dump_site_database() {
+    local output_file="$1"
+    case "${DB_TYPE}" in
+        postgres) db_pg_dump "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${output_file}" ;;
+        mariadb)  db_maria_dump "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${output_file}" ;;
+        mysql)    db_mysql_dump "${DB_NAME}" "${DB_USER}" "${DB_PASS}" "${output_file}" ;;
+        *) err "Unsupported database type '${DB_TYPE}'."; return 1 ;;
+    esac
+    [[ -s "${output_file}" ]] || { err "Database safety dump is empty: ${output_file}"; return 1; }
+    gzip -t "${output_file}"
+}
+
+enable_moodle_maintenance() {
+    local admin_cli="$1" php_version="$2"
+    local maintenance_php="${admin_cli}/maintenance.php"
+    [[ -f "${maintenance_php}" ]] || { err "Maintenance CLI not found: ${maintenance_php}"; return 1; }
+    sudo -u www-data "/usr/bin/php${php_version}" "${maintenance_php}" --enable >> "${_LOG_FILE}" 2>&1
+    register_rollback "rollback_moodle_maintenance '${admin_cli}' '${php_version}'"
+    ok "Maintenance mode enabled and verified by CLI"
+}
+
+rollback_moodle_maintenance() {
+    local admin_cli="$1" php_version="$2"
+    if [[ "${MOODLEKIT_KEEP_MAINTENANCE_ON_FAILURE:-0}" == "1" ]]; then
+        warn "Maintenance mode remains enabled because the database upgrade did not complete safely."
+        return 0
+    fi
+    disable_moodle_maintenance "${admin_cli}" "${php_version}"
+}
+
+disable_moodle_maintenance() {
+    local admin_cli="$1" php_version="$2"
+    local maintenance_php="${admin_cli}/maintenance.php"
+    [[ -f "${maintenance_php}" ]] || return 0
+    sudo -u www-data "/usr/bin/php${php_version}" "${maintenance_php}" --disable >> "${_LOG_FILE}" 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------

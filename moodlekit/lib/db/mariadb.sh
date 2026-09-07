@@ -191,14 +191,22 @@ host=localhost
 MYCNF
     chmod 600 "${tmp_mycnf}"
 
-    zcat "${dump_file}" | mysql --defaults-extra-file="${tmp_mycnf}" "${db_name}"
-    local restore_exit="${PIPESTATUS[1]}"
+    local restore_output
+    restore_output="$(mktemp)"
+    local restore_status=(0 0)
+    zcat "${dump_file}" | mysql --defaults-extra-file="${tmp_mycnf}" "${db_name}" \
+        >"${restore_output}" 2>&1 \
+        || restore_status=("${PIPESTATUS[@]}")
     rm -f "${tmp_mycnf}"
 
-    if [[ "${restore_exit}" -ne 0 ]]; then
-        err "Database restore failed (exit code ${restore_exit})"
+    [[ -z "${_LOG_FILE:-}" ]] || cat "${restore_output}" >> "${_LOG_FILE}"
+    if [[ "${restore_status[0]}" -ne 0 || "${restore_status[1]}" -ne 0 ]]; then
+        err "Database restore failed (decompress=${restore_status[0]}, mysql=${restore_status[1]})."
+        tail -n 20 "${restore_output}" >&2 || true
+        rm -f "${restore_output}"
         return 1
     fi
+    rm -f "${restore_output}"
 
     ok "Database '${db_name}' restored"
 }

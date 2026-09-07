@@ -8,6 +8,7 @@
 
 cmd_fix() {
     require_root
+    umask 077
     load_global_conf 0 || true
     
     local target="${1:-}"
@@ -108,6 +109,8 @@ _doctor_site() {
     
     load_site_conf "${slug}" 1
     init_logging "doctor-${slug}"
+    acquire_lock "site-${slug}"
+    state_operation_start "doctor-fix" "${slug}" '{}'
     
     section "Moodle Doctor — Audit & Diagnostics: ${slug}"
     info "URL: https://${DOMAIN:-$slug} | Directory: ${MOODLE_DIR}"
@@ -174,23 +177,64 @@ _doctor_site() {
         [[ -n "${pool_mvars}" && "${pool_mvars}" =~ ^[0-9]+$ ]] && (( pool_mvars > m_vars )) && m_vars="${pool_mvars}"
     fi
     (( m_vars < 5000 )) && audit_php_ok=0
+
+    # Detect Redis independently of saved global state. Existing servers often
+    # have Redis installed before MoodleKit is adopted.
+    local redis_installed=0 redis_service_ok=0 redis_php_ok=0 redis_expected=0
+    command -v redis-cli &>/dev/null && redis_installed=1
+    if [[ "${redis_installed}" -eq 1 ]] && [[ "$(redis-cli ping 2>/dev/null || true)" == "PONG" ]]; then
+        redis_service_ok=1
+    fi
+    if "/usr/bin/php${target_php}" -m 2>/dev/null | grep -qi '^redis$'; then
+        redis_php_ok=1
+    fi
+    local site_config
+    site_config="$(find_moodle_config_file "${MOODLE_DIR}")"
+    if [[ "${USE_REDIS:-0}" == "1" || "${USE_REDIS_SESSIONS:-0}" == "1" ]] || \
+       { [[ -n "${site_config}" ]] && grep -qi 'redis' "${site_config}" 2>/dev/null; }; then
+        redis_expected=1
+    fi
+    if [[ "${redis_expected}" -eq 1 ]] && \
+       { [[ "${redis_installed}" -ne 1 || "${redis_service_ok}" -ne 1 || "${redis_php_ok}" -ne 1 ]]; }; then
+        audit_cache_ok=0
+    fi
     
     # 5. Check PHP-FPM
     local fpm_sock
     fpm_sock="$(detect_fpm_socket "${slug}" "${target_php}")"
-    if [[ ! -f "${fpm_pool}" && ! -S "${fpm_sock}" ]]; then
+    if [[ ! -f "${fpm_pool}" || ! -S "${fpm_sock}" ]] || \
+       ! systemctl is-active --quiet "php${target_php}-fpm" 2>/dev/null; then
+        audit_fpm_ok=0
+    fi
+    local configured_workers=0 live_workers=0 saturation_events=0 recent_503=0
+    if [[ -f "${fpm_pool}" ]]; then
+        configured_workers="$(awk -F= '/^pm\.max_children[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${fpm_pool}")"
+        [[ "${configured_workers}" =~ ^[0-9]+$ ]] || configured_workers=0
+    fi
+    live_workers="$(ps -eo comm=,args= 2>/dev/null | awk -v pool="php-fpm: pool ${slug}" '$1 ~ /^php-fpm/ && index($0, pool) {count++} END {print count+0}')"
+    local log_file
+    for log_file in /var/log/php"${target_php}"-fpm*.log; do
+        [[ -f "${log_file}" ]] || continue
+        if tail -n 500 "${log_file}" 2>/dev/null | grep -q 'reached pm.max_children'; then
+            saturation_events=$(( saturation_events + 1 ))
+        fi
+    done
+    local access_log="/var/log/nginx/moodle-${slug}.access.log"
+    if [[ -f "${access_log}" ]]; then
+        recent_503="$(tail -n 500 "${access_log}" 2>/dev/null | awk '$9 == 503 {count++} END {print count+0}')"
+    fi
+    if (( saturation_events > 0 || recent_503 > 0 )); then
         audit_fpm_ok=0
     fi
     
     # 6. Check Nginx
     local nginx_conf="${NGINX_CONF:-/etc/nginx/sites-available/moodle-${slug}}"
     local nginx_enabled="/etc/nginx/sites-enabled/moodle-${slug}"
-    if [[ ! -f "${nginx_conf}" || ! -L "${nginx_enabled}" ]]; then
+    if [[ ! -f "${nginx_conf}" || ! -L "${nginx_enabled}" ]] || ! nginx -t >/dev/null 2>&1; then
         audit_nginx_ok=0
     fi
     
     # 7. Check Cron
-    local audit_cron_ok=1
     local detected_cron
     detected_cron="$(detect_moodle_cron "${slug}" "${MOODLE_DIR}")"
     [[ -z "${detected_cron}" ]] && audit_cron_ok=0
@@ -217,7 +261,13 @@ _doctor_site() {
     _print_status_item "Nginx Virtual Host & Route"   "${audit_nginx_ok}" "Nginx vhost missing or not enabled"
     _print_status_item "Moodle Cron Job Daemon"       "${audit_cron_ok}" "Cron job in /etc/cron.d/ missing"
     _print_status_item "Production Dev Libraries"     "${audit_devlibs_ok}" "node_modules present or composer dev libraries installed"
-    _print_status_item "Cache & Session Storage"      "${audit_cache_ok}" "Ready for cache refresh"
+    _print_status_item "Redis, Cache & Sessions"      "${audit_cache_ok}" "Redis is configured but server, service, or PHP extension is unavailable"
+    info "FPM load evidence: live_workers=${live_workers}, configured_max=${configured_workers}, saturation_logs=${saturation_events}, recent_503=${recent_503}"
+    if [[ "${redis_installed}" -eq 1 ]]; then
+        info "Redis detected: service=$([ "${redis_service_ok}" -eq 1 ] && echo healthy || echo unavailable), PHP extension=$([ "${redis_php_ok}" -eq 1 ] && echo loaded || echo missing), site usage=$([ "${redis_expected}" -eq 1 ] && echo configured || echo not configured)"
+    else
+        info "Redis detected: not installed; site usage=$([ "${redis_expected}" -eq 1 ] && echo configured || echo not configured)"
+    fi
     echo ""
     
     # ── Phase 2: Interactive Fix Selection ──────────────────────────────────
@@ -249,7 +299,8 @@ _doctor_site() {
                 "6. Nginx Web Server Virtual Host & Upstream Route" \
                 "7. Cron Job Installation & Task Queue Unlock" \
                 "8. Remove node_modules & Enforce composer --no-dev" \
-                "9. Purge All Moodle Caches & Reset Maintenance Mode"
+                "9. Detect & Repair Redis Service / PHP Extension" \
+                "10. Purge All Moodle Caches & Reset Maintenance Mode"
             
             _apply_custom_fixes "${slug}" "${selected_fixes[@]}"
             ;;
@@ -274,13 +325,21 @@ _doctor_site() {
             _fix_cron "${slug}"
             ;;
         *"Purge All Moodle Caches"*)
+            _fix_redis "${slug}"
             _fix_cache "${slug}"
             ;;
         *"Cancel"*)
+            state_operation_finish "cancelled" "Audit completed without repairs"
+            release_lock
+            clear_rollbacks
             info "Audit completed. No changes made."
             return 0
             ;;
     esac
+
+    state_operation_finish "completed" "Doctor audit and selected repairs completed"
+    release_lock
+    clear_rollbacks
 }
 
 # ---------------------------------------------------------------------------
@@ -321,7 +380,8 @@ _apply_custom_fixes() {
             *6.*) _fix_nginx "${slug}" ;;
             *7.*) _fix_cron "${slug}" ;;
             *8.*) _fix_devlibs "${slug}" ;;
-            *9.*) _fix_cache "${slug}" ;;
+            *9.*) _fix_redis "${slug}" ;;
+            *10.*) _fix_cache "${slug}" ;;
         esac
     done
     
@@ -345,14 +405,15 @@ _apply_all_fixes() {
     _fix_nginx "${slug}"
     _fix_cron "${slug}"
     _fix_devlibs "${slug}"
+    _fix_redis "${slug}"
     _fix_cache "${slug}"
     
     print_box "Doctor Pipeline Complete: ${slug} ✓" \
         "URL:          https://${DOMAIN:-$slug}" \
         "Directory:    ${MOODLE_DIR}" \
         "Dataroot:     ${MOODLEDATA_DIR}" \
-        "Permissions:  Secured (0755 code, 02777 data, 0640 config)" \
-        "Database:     Checked & Optimized" \
+        "Permissions:  Secured (0755 code, 2770 data dirs, 0640 config)" \
+        "Database:     Connectivity and credentials verified" \
         "PHP & FPM:    Tuned and Active" \
         "Dev Libs:     node_modules removed & composer in --no-dev" \
         "Caches:       Purged" \
@@ -367,9 +428,7 @@ _fix_perms() {
     step 1 1 "Normalizing Code & File Permissions"
     if [[ -d "${MOODLE_DIR}" ]]; then
         spinner_start "Setting permissions on ${MOODLE_DIR}..."
-        chown -R root:www-data "${MOODLE_DIR}"
-        find "${MOODLE_DIR}" -type d -exec chmod 755 {} +
-        find "${MOODLE_DIR}" -type f -exec chmod 644 {} +
+        normalize_moodle_code_permissions "${MOODLE_DIR}"
         
         if [[ -f "${MOODLE_DIR}/config.php" ]]; then
             chown root:www-data "${MOODLE_DIR}/config.php"
@@ -390,15 +449,16 @@ _fix_dataroot() {
     done
     
     chown -R www-data:www-data "${MOODLEDATA_DIR}"
-    chmod -R 02777 "${MOODLEDATA_DIR}" 2>/dev/null || chmod -R 2770 "${MOODLEDATA_DIR}"
+    find "${MOODLEDATA_DIR}" -type d -exec chmod 2770 {} +
+    find "${MOODLEDATA_DIR}" -type f -exec chmod 660 {} +
     
     cat > "${MOODLEDATA_DIR}/.htaccess" << 'HTACCESS'
 Order deny,allow
 Deny from all
 HTACCESS
     chown www-data:www-data "${MOODLEDATA_DIR}/.htaccess"
-    chmod 644 "${MOODLEDATA_DIR}/.htaccess"
-    ok "Dataroot structure restored (www-data:www-data 02777)"
+    chmod 640 "${MOODLEDATA_DIR}/.htaccess"
+    ok "Dataroot structure restored (www-data:www-data, 2770 dirs, 0660 files)"
 }
 
 _fix_database() {
@@ -406,16 +466,34 @@ _fix_database() {
     step 1 1 "Testing & Auto-Repairing Database Tables"
     case "${DB_TYPE:-mariadb}" in
         postgres)
-            if sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw "${DB_NAME}"; then
-                ok "PostgreSQL database '${DB_NAME}' reachable"
+            db_pg_db_exists "${DB_NAME}" || { err "PostgreSQL database '${DB_NAME}' does not exist."; return 1; }
+            local pgpass_file
+            pgpass_file="$(mktemp)"
+            printf 'localhost:%s:%s:%s:%s\n' "${DB_PORT:-5432}" "${DB_NAME}" "${DB_USER}" "${DB_PASS}" > "${pgpass_file}"
+            chmod 600 "${pgpass_file}"
+            if ! PGPASSFILE="${pgpass_file}" psql -h localhost -p "${DB_PORT:-5432}" \
+                -U "${DB_USER}" -d "${DB_NAME}" -Atqc 'SELECT 1' >> "${_LOG_FILE}" 2>&1; then
+                rm -f "${pgpass_file}"
+                err "PostgreSQL login or query failed for '${DB_USER}' on '${DB_NAME}'."
+                return 1
             fi
+            rm -f "${pgpass_file}"
+            ok "PostgreSQL database and site credentials verified"
             ;;
         mariadb|mysql)
-            if command -v mysqlcheck &>/dev/null; then
-                spinner_start "Running mysqlcheck --auto-repair on '${DB_NAME}'..."
-                mysqlcheck -u root --auto-repair --check --optimize "${DB_NAME}" >> "${_LOG_FILE}" 2>&1 || true
-                spinner_stop 0 "Database tables verified and optimized"
+            command -v mysqlcheck &>/dev/null || { err "mysqlcheck is not installed."; return 1; }
+            spinner_start "Checking and auto-repairing tables in '${DB_NAME}'..."
+            # mysqlcheck actions are mutually exclusive. The default action is
+            # CHECK; --auto-repair repairs any tables reported as corrupt.
+            if ! mysqlcheck -u root --auto-repair "${DB_NAME}" >> "${_LOG_FILE}" 2>&1; then
+                spinner_stop 1 "Database verification failed"
+                return 1
             fi
+            if ! mysqlcheck -u root --optimize "${DB_NAME}" >> "${_LOG_FILE}" 2>&1; then
+                spinner_stop 1 "Database optimization failed"
+                return 1
+            fi
+            spinner_stop 0 "Database tables verified and optimized"
             ;;
     esac
 }
@@ -446,7 +524,11 @@ _fix_fpm() {
     local pool_conf="${FPM_POOL_CONF:-/etc/php/${target_php}/fpm/pool.d/${slug}.conf}"
     [[ ! -f "${pool_conf}" && -f "/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf" ]] && pool_conf="/etc/php/${target_php}/fpm/pool.d/moodle_${slug}.conf"
     
-    calculate_tuning "balanced" 1 "${DB_TYPE:-mariadb}"
+    local managed_sites
+    managed_sites="$(list_site_slugs | awk 'NF {count++} END {print count+0}')"
+    (( managed_sites < 1 )) && managed_sites=1
+    calculate_tuning "balanced" "${managed_sites}" "${DB_TYPE:-mariadb}"
+    info "Safe FPM sizing: ${TUNE_FPM_MAX_CHILDREN} workers for each of ${managed_sites} site(s); cap=${TUNE_FPM_WORKER_CAP}, reserve=${TUNE_FPM_WORKER_MEMORY_MB}MB/worker"
     render_template_to_file "${MOODLEKIT_TPL}/fpm-pool.conf.tpl" "${pool_conf}" \
         "SLUG=${slug}" \
         "PHP_VERSION=${target_php}" \
@@ -461,6 +543,7 @@ _fix_fpm() {
         "TIMESTAMP=$(date)"
     
     reload_fpm "${target_php}"
+    wait_for_fpm_socket "${fpm_sock}" 30
     ok "PHP-FPM pool active (${pool_conf}, socket: ${fpm_sock})"
 }
 
@@ -486,6 +569,13 @@ _fix_nginx() {
             "PHP_VERSION=${target_php}" \
             "FPM_SOCK=${fpm_sock}" \
             "SLUG=${slug}"
+
+        if [[ "${DOMAIN:-}" == *.local || "${DOMAIN:-}" == *.test || "${DOMAIN:-}" != *.* ]]; then
+            generate_self_signed_fallback "${DOMAIN:-$slug.local}" "${nginx_conf}"
+        elif [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" || ! -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
+            err "TLS certificate files are missing for ${DOMAIN}; refusing to enable a broken vhost."
+            return 1
+        fi
     fi
     
     ln -sf "${nginx_conf}" "${nginx_link}"
@@ -493,7 +583,8 @@ _fix_nginx() {
         reload_nginx
         ok "Nginx virtual host active & reloaded"
     else
-        warn "Nginx syntax error! Check /var/log/nginx/error.log"
+        err "Nginx syntax error; the service was not reloaded. Check /var/log/nginx/error.log"
+        return 1
     fi
 }
 
@@ -530,14 +621,69 @@ _fix_cache() {
     admin_cli="$(find_moodle_admin_cli "${MOODLE_DIR}")"
     
     if [[ -f "${admin_cli}/purge_caches.php" ]]; then
-        sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/purge_caches.php" >/dev/null 2>&1 || true
+        if ! sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/purge_caches.php" >> "${_LOG_FILE}" 2>&1; then
+            err "Moodle cache purge failed."
+            return 1
+        fi
         ok "Moodle caches purged"
+    else
+        err "Moodle cache CLI not found: ${admin_cli}/purge_caches.php"
+        return 1
     fi
     
     if [[ -f "${admin_cli}/maintenance.php" ]]; then
-        sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/maintenance.php" --disable >/dev/null 2>&1 || true
+        if ! sudo -u www-data "/usr/bin/php${target_php}" "${admin_cli}/maintenance.php" --disable >> "${_LOG_FILE}" 2>&1; then
+            err "Could not disable Moodle maintenance mode."
+            return 1
+        fi
         ok "Maintenance mode disabled"
     fi
+}
+
+_fix_redis() {
+    local slug="$1"
+    step 1 1 "Detecting & Repairing Redis Integration"
+    local target_php="${PHP_VERSION:-}"
+    [[ -z "${target_php}" ]] && target_php="$(get_installed_php_version)"
+    local config_file
+    config_file="$(find_moodle_config_file "${MOODLE_DIR}")"
+    local redis_expected=0
+    if [[ "${USE_REDIS:-0}" == "1" || "${USE_REDIS_SESSIONS:-0}" == "1" ]] || \
+       { [[ -n "${config_file}" ]] && grep -qi 'redis' "${config_file}" 2>/dev/null; }; then
+        redis_expected=1
+    fi
+
+    if ! command -v redis-cli &>/dev/null; then
+        if [[ "${redis_expected}" -eq 1 ]]; then
+            err "Site '${slug}' is configured for Redis, but redis-cli/server is not installed."
+            err "Run 'moodlekit bootstrap' to install Redis safely, then retry Doctor."
+            return 1
+        fi
+        info "Redis is not installed and this site is not configured to use it; no Redis repair needed."
+        return 0
+    fi
+
+    if [[ "$(redis-cli ping 2>/dev/null || true)" != "PONG" ]]; then
+        warn "Redis is installed but not responding; starting the service."
+        systemctl enable --now redis-server >> "${_LOG_FILE}" 2>&1 || \
+            systemctl enable --now redis >> "${_LOG_FILE}" 2>&1
+    fi
+    [[ "$(redis-cli ping 2>/dev/null || true)" == "PONG" ]] || {
+        err "Redis did not respond to PING after service repair."
+        return 1
+    }
+
+    if ! "/usr/bin/php${target_php}" -m 2>/dev/null | grep -qi '^redis$'; then
+        warn "PHP ${target_php} Redis extension is missing; installing php${target_php}-redis."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "php${target_php}-redis" >> "${_LOG_FILE}" 2>&1
+        reload_fpm "${target_php}"
+    fi
+    "/usr/bin/php${target_php}" -m 2>/dev/null | grep -qi '^redis$' || {
+        err "PHP ${target_php} Redis extension is still unavailable after repair."
+        return 1
+    }
+
+    ok "Redis detected and healthy (PING=PONG, PHP ${target_php} extension loaded, site configured=$redis_expected)"
 }
 
 _fix_devlibs() {
@@ -558,11 +704,14 @@ _fix_devlibs() {
     # 2. Re-install Composer dependencies in strict --no-dev mode
     if [[ -f "${MOODLE_DIR}/composer.json" ]] && command -v composer &>/dev/null; then
         spinner_start "Installing composer dependencies with --no-dev..."
-        COMPOSER_ALLOW_SUPERUSER=1 composer install \
+        if ! COMPOSER_ALLOW_SUPERUSER=1 composer install \
             --no-dev \
             --optimize-autoloader \
             --no-interaction \
-            --working-dir="${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1 || true
+            --working-dir="${MOODLE_DIR}" >> "${_LOG_FILE}" 2>&1; then
+            spinner_stop 1 "Composer production dependency verification failed"
+            return 1
+        fi
         spinner_stop 0 "Composer production libraries verified"
     fi
 
@@ -572,7 +721,10 @@ _fix_devlibs() {
     if [[ -f "${admin_cli}/purge_caches.php" ]]; then
         local active_php="${PHP_VERSION:-}"
         [[ -z "${active_php}" ]] && active_php="$(get_installed_php_version)"
-        sudo -u www-data "/usr/bin/php${active_php}" "${admin_cli}/purge_caches.php" >/dev/null 2>&1 || true
+        sudo -u www-data "/usr/bin/php${active_php}" "${admin_cli}/purge_caches.php" >> "${_LOG_FILE}" 2>&1 || {
+            err "Moodle cache purge failed after dependency cleanup."
+            return 1
+        }
     fi
     ok "Development libraries removed & security check cleared"
 }
@@ -593,7 +745,7 @@ _doctor_all_sites() {
     
     section "Moodle Doctor — Fixing All Managed Sites (${#slugs[@]})"
     for s in "${slugs[@]}"; do
-        _apply_all_fixes "${s}"
+        _doctor_site "${s}"
         echo ""
     done
     ok "All managed sites repaired successfully!"
@@ -629,9 +781,7 @@ _doctor_standalone() {
     case "${action}" in
         *"Apply Permissions, Dataroot"*)
             info "Resetting permissions..."
-            chown -R root:www-data "${moodle_dir}"
-            find "${moodle_dir}" -type d -exec chmod 755 {} +
-            find "${moodle_dir}" -type f -exec chmod 644 {} +
+            normalize_moodle_code_permissions "${moodle_dir}"
             [[ -n "${cfg_file}" && -f "${cfg_file}" ]] && chmod 640 "${cfg_file}"
             
             local dataroot=""
@@ -644,7 +794,8 @@ _doctor_standalone() {
                     mkdir -p "${dataroot}/${sd}"
                 done
                 chown -R www-data:www-data "${dataroot}"
-                chmod -R 02777 "${dataroot}" 2>/dev/null || chmod -R 2770 "${dataroot}"
+                find "${dataroot}" -type d -exec chmod 2770 {} +
+                find "${dataroot}" -type f -exec chmod 660 {} +
             fi
             
             local php_bin
@@ -655,9 +806,7 @@ _doctor_standalone() {
             ok "Standalone site repaired successfully!"
             ;;
         *"Fix File & Directory Permissions"*)
-            chown -R root:www-data "${moodle_dir}"
-            find "${moodle_dir}" -type d -exec chmod 755 {} +
-            find "${moodle_dir}" -type f -exec chmod 644 {} +
+            normalize_moodle_code_permissions "${moodle_dir}"
             [[ -n "${cfg_file}" && -f "${cfg_file}" ]] && chmod 640 "${cfg_file}"
             ok "Permissions set"
             ;;

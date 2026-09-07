@@ -19,6 +19,56 @@ readonly TUNING_WORKER_MEMORY_MB=384        # Avg PHP-FPM worker memory for Mood
 readonly TUNING_SAFETY_FACTOR="0.80"        # Max 80% of total RAM
 readonly TUNING_CONSERVATIVE_FACTOR="0.60"  # Conservative mode
 
+# Estimate a safe per-worker reservation from live PHP-FPM RSS. Idle workers
+# are much smaller than workers serving Moodle requests, so use p95 + 50%
+# headroom with a 256MB floor. An explicit value is useful for deterministic
+# provisioning and tests.
+detect_fpm_worker_memory_mb() {
+    if [[ "${MOODLEKIT_FPM_WORKER_MB:-}" =~ ^[0-9]+$ ]] && \
+       (( MOODLEKIT_FPM_WORKER_MB >= 64 && MOODLEKIT_FPM_WORKER_MB <= 1024 )); then
+        TUNE_FPM_OBSERVED_RSS_MB="${MOODLEKIT_FPM_WORKER_MB}"
+        TUNE_FPM_WORKER_MEMORY_MB="${MOODLEKIT_FPM_WORKER_MB}"
+        TUNE_FPM_MEMORY_SOURCE="override"
+        return 0
+    fi
+
+    local -a samples=()
+    mapfile -t samples < <(ps -eo comm=,rss=,args= 2>/dev/null | \
+        awk '$1 ~ /^php-fpm/ && $0 ~ /php-fpm: pool / {printf "%d\n", ($2 + 1023) / 1024}' | sort -n)
+    if [[ ${#samples[@]} -gt 0 ]]; then
+        local index=$(( (${#samples[@]} * 95 + 99) / 100 - 1 ))
+        local observed="${samples[$index]}"
+        local reserved=$(( (observed * 3 + 1) / 2 ))
+        (( reserved < 256 )) && reserved=256
+        (( reserved > 512 )) && reserved=512
+        TUNE_FPM_OBSERVED_RSS_MB="${observed}"
+        TUNE_FPM_WORKER_MEMORY_MB="${reserved}"
+        TUNE_FPM_MEMORY_SOURCE="live p95 RSS + 50% headroom"
+    else
+        TUNE_FPM_OBSERVED_RSS_MB=0
+        TUNE_FPM_WORKER_MEMORY_MB="${TUNING_WORKER_MEMORY_MB}"
+        TUNE_FPM_MEMORY_SOURCE="safe fallback (no live workers)"
+    fi
+}
+
+set_fpm_pool_workers() {
+    local workers="$1"
+    [[ "${workers}" =~ ^[0-9]+$ ]] || { err "FPM worker count must be numeric."; return 1; }
+    (( workers >= 2 )) || { err "FPM worker count must be at least 2."; return 1; }
+    (( workers <= TUNE_FPM_WORKER_CAP )) || {
+        err "FPM worker count ${workers} exceeds this server's safe cap of ${TUNE_FPM_WORKER_CAP}."
+        return 1
+    }
+    TUNE_FPM_MAX_CHILDREN="${workers}"
+    TUNE_FPM_START_SERVERS=$(( workers / 3 ))
+    (( TUNE_FPM_START_SERVERS < 1 )) && TUNE_FPM_START_SERVERS=1
+    TUNE_FPM_MIN_SPARE=$(( workers / 4 ))
+    (( TUNE_FPM_MIN_SPARE < 1 )) && TUNE_FPM_MIN_SPARE=1
+    TUNE_FPM_MAX_SPARE=$(( workers * 2 / 3 ))
+    (( TUNE_FPM_MAX_SPARE < TUNE_FPM_START_SERVERS )) && TUNE_FPM_MAX_SPARE="${TUNE_FPM_START_SERVERS}"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Calculate all tuning values from hardware specs
 # Call after detect_hardware() has set RAM_TOTAL_MB etc.
@@ -33,6 +83,7 @@ calculate_tuning() {
     [[ "${mode}" == "aggressive" ]]   && safety_factor="0.88"
 
     local total_mb="${RAM_TOTAL_MB:-2048}"
+    detect_fpm_worker_memory_mb
 
     # Max usable MB
     local usable_mb
@@ -92,7 +143,7 @@ calculate_tuning() {
     # PHP-FPM total workers
     # ---------------------------------------------------------------------------
     (( remaining_mb < 384 )) && remaining_mb=384
-    local total_workers=$(( remaining_mb / TUNING_WORKER_MEMORY_MB ))
+    local total_workers=$(( remaining_mb / TUNE_FPM_WORKER_MEMORY_MB ))
     (( total_workers < 2 )) && total_workers=2
 
     # Per-site workers
@@ -101,13 +152,19 @@ calculate_tuning() {
     local per_site_workers=$(( total_workers / sites ))
     (( per_site_workers < 2 )) && per_site_workers=2
 
-    TUNE_FPM_MAX_CHILDREN="${per_site_workers}"
-    TUNE_FPM_START_SERVERS=$(( per_site_workers / 3 ))
-    (( TUNE_FPM_START_SERVERS < 1 )) && TUNE_FPM_START_SERVERS=1
-    TUNE_FPM_MIN_SPARE=$(( per_site_workers / 4 ))
-    (( TUNE_FPM_MIN_SPARE < 1 )) && TUNE_FPM_MIN_SPARE=1
-    TUNE_FPM_MAX_SPARE=$(( per_site_workers * 2 / 3 ))
-    (( TUNE_FPM_MAX_SPARE < TUNE_FPM_START_SERVERS )) && TUNE_FPM_MAX_SPARE="${TUNE_FPM_START_SERVERS}"
+    # On nominal 8GB hosts, never create a pool above ten children. This leaves
+    # room for the DB/cache/OS and prevents swap storms that surface as 503s.
+    if (( total_mb <= 9216 )); then
+        TUNE_FPM_WORKER_CAP=10
+    elif [[ "${mode}" == "conservative" ]]; then
+        TUNE_FPM_WORKER_CAP=10
+    elif [[ "${mode}" == "aggressive" ]]; then
+        TUNE_FPM_WORKER_CAP=30
+    else
+        TUNE_FPM_WORKER_CAP=20
+    fi
+    (( per_site_workers > TUNE_FPM_WORKER_CAP )) && per_site_workers="${TUNE_FPM_WORKER_CAP}"
+    set_fpm_pool_workers "${per_site_workers}"
 
     # ---------------------------------------------------------------------------
     # PostgreSQL max_connections: total_workers * 1.5 + 20 headroom
@@ -136,7 +193,8 @@ DB allocation:    ${db_alloc_mb}MB
 OPcache:          ${TUNING_OPCACHE_MB}MB
 JIT buffer:       ${TUNING_JIT_BUFFER_MB}MB
 Redis maxmemory:  ${TUNE_REDIS_MAX_MB}MB
-FPM total workers: ${total_workers} (${num_sites} sites × max ${per_site_workers}/site)
+FPM worker reserve: ${TUNE_FPM_WORKER_MEMORY_MB}MB (${TUNE_FPM_MEMORY_SOURCE}; observed p95 ${TUNE_FPM_OBSERVED_RSS_MB}MB)
+FPM workers:       ${num_sites} sites × max ${per_site_workers}/site (cap ${TUNE_FPM_WORKER_CAP})
 PHP memory_limit: ${TUNE_PHP_MEMORY_LIMIT_MB}MB
 EOF
 )"
@@ -341,6 +399,8 @@ print_tuning_report() {
     echo -e "  pm.start_servers     = ${TUNE_FPM_START_SERVERS}"
     echo -e "  pm.min_spare_servers = ${TUNE_FPM_MIN_SPARE}"
     echo -e "  pm.max_spare_servers = ${TUNE_FPM_MAX_SPARE}"
+    echo -e "  worker RAM reserve   = ${TUNE_FPM_WORKER_MEMORY_MB}MB (${TUNE_FPM_MEMORY_SOURCE})"
+    echo -e "  per-pool safety cap  = ${TUNE_FPM_WORKER_CAP}"
     echo -e "  memory_limit         = ${TUNE_PHP_MEMORY_LIMIT_MB}M"
     echo -e "  upload_max_filesize  = ${TUNE_PHP_UPLOAD_MB}M"
     echo ""
@@ -366,7 +426,7 @@ print_tuning_report() {
 
     # Safety check
     local total_used=$(( TUNING_OS_RESERVE_MB + db_alloc_mb + TUNING_OPCACHE_MB + TUNING_JIT_BUFFER_MB + TUNE_REDIS_MAX_MB ))
-    local fpm_used=$(( TUNE_FPM_MAX_CHILDREN * num_sites * TUNING_WORKER_MEMORY_MB ))
+    local fpm_used=$(( TUNE_FPM_MAX_CHILDREN * num_sites * TUNE_FPM_WORKER_MEMORY_MB ))
     local grand_total=$(( total_used + fpm_used ))
     local pct=$(( grand_total * 100 / RAM_TOTAL_MB ))
     echo -e "${C_BOLD}Estimated total RAM usage: ~$(human_size $(( grand_total * 1024 * 1024 ))) (${pct}% of ${RAM_TOTAL_GB}GB)${C_RESET}"

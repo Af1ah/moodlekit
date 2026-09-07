@@ -49,9 +49,16 @@ class EncryptedVault:
     def get_or_create_master_key(self) -> bytes:
         if self.key_path.exists():
             with open(self.key_path, "rb") as f:
-                key = f.read().strip()
-                if len(key) >= 32:
+                # The key is raw binary.  Stripping whitespace can remove a
+                # perfectly valid leading/trailing byte and make an existing
+                # vault permanently unreadable on the next invocation.
+                key = f.read()
+                if len(key) == 32:
                     return key
+            raise RuntimeError(
+                f"Invalid master key length in {self.key_path}: "
+                f"expected 32 bytes, found {len(key)}. Refusing to replace it."
+            )
         # Generate new random master key
         key = secrets.token_bytes(32)
         try:

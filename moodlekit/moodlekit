@@ -54,6 +54,7 @@ done
 
 # Initialize vault and auto-migrate legacy data
 vault_init
+state_init
 
 # ---------------------------------------------------------------------------
 # Global flag parser
@@ -125,6 +126,10 @@ Security & Vault:
   vault status       Show encrypted binary vault status and key location
   vault dump         Display decrypted vault JSON data (root only)
   vault migrate      Migrate legacy .conf files into encrypted vault
+
+Tool Management:
+  uninstall [program|automation|full]
+                      Safely remove MoodleKit without deleting Moodle sites or databases
 EOF
 }
 
@@ -138,9 +143,13 @@ _pick_site_slug() {
     local include_partial="${3:-0}"
     local -a slugs
     
-    if [[ "${include_partial}" == "1" ]]; then
+    if type state_site_slugs &>/dev/null; then
+        mapfile -t slugs < <(state_site_slugs)
+    fi
+
+    if [[ ${#slugs[@]} -eq 0 && "${include_partial}" == "1" ]]; then
         mapfile -t slugs < <(list_removable_slugs 2>/dev/null)
-    else
+    elif [[ ${#slugs[@]} -eq 0 ]]; then
         mapfile -t slugs < <(list_site_slugs 2>/dev/null)
     fi
 
@@ -174,6 +183,7 @@ _interactive_main_menu() {
         "Backup: Deploy Cloud Sync" \
         "Backup: Select / Update Sites for Cloud Backup" \
         "Vault: Status & Security" \
+        "Tool: Safely Uninstall MoodleKit" \
         "Exit"
 
     case "${choice}" in
@@ -264,6 +274,10 @@ _interactive_main_menu() {
             python3 "${MOODLEKIT_LIB}/vault.py" status
             ;;
 
+        *"Tool: Safely Uninstall"*)
+            cmd_uninstall
+            ;;
+
         *"Exit"*)
             exit 0
             ;;
@@ -326,6 +340,9 @@ main() {
                 migrate) python3 "${MOODLEKIT_LIB}/vault.py" migrate ;;
                 *)       err "Usage: moodlekit vault <status|dump|migrate>"; exit 1 ;;
             esac
+            ;;
+        uninstall)
+            cmd_uninstall "${subcmd}" "$@"
             ;;
         *)
             if [[ -n "${cmd}" ]]; then

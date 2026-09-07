@@ -178,6 +178,7 @@ cmd_site_remove() {
     # ─────────────────────────────────────────────────────────────────────────
     step 9 9 "Remove state + rebalance FPM pools"
     vault_sdel "${SLUG}"
+    state_site_delete "${SLUG}"
     rm -f "${MOODLEKIT_SITES_DIR}/${SLUG}.conf"
     rm -f "/tmp/moodlekit-${SLUG}.lock"
 

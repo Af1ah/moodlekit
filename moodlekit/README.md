@@ -9,11 +9,14 @@ Supports both **Standalone Moodle sites** (located anywhere on disk) and **Multi
 ## Key Features
 
 - **Moodle Doctor & Fixer (`moodlekit fix`)**: Automated diagnostics and 1-click repair for file permissions, dataroot corruption, database connectivity, table repair, PHP configuration limits, missing PHP-FPM pools, Nginx vhost routing, cron execution, task queue locks, and cache purging.
+- **Safe Uninstall (`moodlekit uninstall`)**: Removes MoodleKit while preserving Moodle code, databases, moodledata, Nginx/PHP-FPM/site cron configuration, and backups. Optional modes can also retire cloud automation or archive and remove tool metadata.
 - **Standalone Site Adoption (`moodlekit adopt`)**: Discover existing unmanaged Moodle installations across your server and seamlessly register them into MoodleKit management.
 - **AES-256 Encrypted Binary Vault**: Replaces plaintext `.conf` and `secrets.json` files with authenticated AES-256-CBC + HMAC-SHA256 (PBKDF2 100,000 iterations) storage (`/etc/moodlekit/vault.bin`), protected by a strict `0600` master key.
 - **Server Bootstrap & Auto-Tuning**: Non-destructive server provisioning for PHP (8.1/8.3/8.4), Nginx, PostgreSQL 17/MariaDB/MySQL, Redis, Memcached, Certbot, UFW, and fail2ban, with RAM-aware dynamic auto-tuning.
 - **Automated Cloud Backups & Cloud Sync**: Local backup generation (database dump, config, dataroot, and manifest) + automated Google Drive sync via `rclone` with live Telegram progress notifications.
 - **Flexible 3-Method Restore**: Restore in-place into existing sites, provision fresh instances from backup manifests, or perform legacy recovery from raw `.sql` and data archives.
+- **Fail-Closed Restore & Upgrade Safety**: Verifies manifests, checksums, gzip/tar integrity, PHP/runtime compatibility, maintenance mode, Git cleanliness, database snapshots, cron, and service configuration before returning a site online.
+- **Fast Non-Secret State Index**: `/etc/moodlekit/state.db` caches site discovery data and records the current step/result of long operations. Credentials remain exclusively in the encrypted vault; the SQLite index is mode `0600` and never stores passwords or tokens.
 
 ---
 
@@ -28,6 +31,10 @@ sudo ./install.sh
 ## Usage
 
 ### 1. Moodle Doctor & Repair (Fix Common Issues)
+
+`moodlekit fix <slug>` repairs one site. `moodlekit tune <mode>` is server-wide and recalculates PHP, the selected database engine, Redis, and all managed PHP-FPM pools.
+
+FPM pool creation uses live PHP-FPM p95 RSS with safety headroom when workers are available, otherwise a conservative fallback. Servers up to approximately 8 GB are capped at 10 workers per site; interactive site creation preselects the calculated recommendation and permits a custom value only within the safe cap. Doctor also detects Redis independently, verifies `PING`, checks the PHP Redis extension and repairs the service/extension when required.
 Diagnose and repair permissions, dataroot, database, PHP-FPM pools, Nginx, and caches:
 ```bash
 sudo moodlekit fix

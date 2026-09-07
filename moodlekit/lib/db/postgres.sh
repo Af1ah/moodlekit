@@ -206,20 +206,27 @@ db_pg_restore() {
     echo "localhost:5432:${db_name}:${db_user}:${db_pass}" > "${tmp_pgpass}"
     chmod 600 "${tmp_pgpass}"
 
+    local restore_output
+    restore_output="$(mktemp)"
+    local restore_status=(0 0)
     zcat "${dump_file}" | PGPASSFILE="${tmp_pgpass}" psql \
         -h localhost \
         -U "${db_user}" \
         -d "${db_name}" \
         --no-password \
-        -v ON_ERROR_STOP=1 2>&1
-
-    local psql_exit="${PIPESTATUS[1]}"
+        -v ON_ERROR_STOP=1 >"${restore_output}" 2>&1 \
+        || restore_status=("${PIPESTATUS[@]}")
     rm -f "${tmp_pgpass}"
 
-    if [[ "${psql_exit}" -ne 0 ]]; then
-        err "Database restore failed (exit code ${psql_exit})"
+    [[ -z "${_LOG_FILE:-}" ]] || cat "${restore_output}" >> "${_LOG_FILE}"
+
+    if [[ "${restore_status[0]}" -ne 0 || "${restore_status[1]}" -ne 0 ]]; then
+        err "Database restore failed (decompress=${restore_status[0]}, psql=${restore_status[1]})."
+        tail -n 20 "${restore_output}" >&2 || true
+        rm -f "${restore_output}"
         return 1
     fi
+    rm -f "${restore_output}"
 
     ok "Database '${db_name}' restored"
 }

@@ -137,7 +137,8 @@ cmd_bootstrap() {
 
     # Timezone
     local target_tz
-    target_tz="$(configure_system_timezone 0)"
+    configure_system_timezone 0
+    target_tz="$(get_system_timezone)"
 
     # Base domain
     local base_domain=""

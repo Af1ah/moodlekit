@@ -424,9 +424,8 @@ server_tokens           off;
 keepalive_timeout  65;
 keepalive_requests 100;
 
-# Login brute-force rate limiting (per site via limit_req)
-limit_req_zone $binary_remote_addr zone=moodle_login:10m rate=5r/m;
-limit_req_log_level warn;
+# Login throttling is managed by Moodle account policies.
+# Do not create a shared per-IP zone: campus users may share one address.
 NGINXGLOBAL
 
     # Enable Gzip in main nginx.conf instead of conf.d to prevent duplicates

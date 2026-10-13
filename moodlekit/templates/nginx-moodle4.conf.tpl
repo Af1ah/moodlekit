@@ -89,10 +89,8 @@ server {
         fastcgi_buffer_size    32k;
     }
 
-    # ── Login rate limiting ────────────────────────────────────────────────────
+    # Login PHP handler (no shared per-IP throttle)
     location = /login/index.php {
-        limit_req zone=moodle_login burst=3 nodelay;
-        limit_req_status 429;
         fastcgi_split_path_info  ^(.+\.php)(/.*)$;
         fastcgi_pass             unix:{{FPM_SOCK}};
         include                  fastcgi_params;

@@ -50,14 +50,16 @@ cmd_site_create() {
     fi
 
     # Domain
-    local default_domain="${SLUG}.${BASE_DOMAIN}"
-    [[ -z "${BASE_DOMAIN}" ]] && default_domain="${SLUG}"
+    local default_domain=""
+    if [[ -n "${BASE_DOMAIN:-}" ]]; then
+        default_domain="${SLUG}.${BASE_DOMAIN}"
+    fi
     
     local DOMAIN=""
     if [[ -n "${OPT_DOMAIN:-}" ]]; then
         DOMAIN="${OPT_DOMAIN}"
     else
-        input_text DOMAIN "Enter the full domain for this site" "${default_domain}" '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' "Invalid domain format"
+        input_text DOMAIN "Enter the full domain or subdomain for this site" "${default_domain}" '^[a-zA-Z0-9][a-zA-Z0-9.-]*$' "Invalid domain format"
     fi
     validate_domain "${DOMAIN}"
     local domain_owner=""

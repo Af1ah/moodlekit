@@ -84,12 +84,7 @@ detect_mysql_server_flavor() {
     fi
 }
 
-detect_installed() {
-    info "Scanning for pre-installed software..."
-    info "Version checks are limited to 5 seconds per program."
-    INSTALLED_TOOLS=()
-
-    # ── PHP ──
+detect_installed_php() {
     PHP_INSTALLED=""
     PHP_INSTALLED_VERSION=""
     # Check each version we support
@@ -104,9 +99,18 @@ detect_installed() {
     # Fallback: generic php command
     if [[ -z "${PHP_INSTALLED}" ]] && command -v php &>/dev/null 2>&1; then
         PHP_INSTALLED_VERSION="$(timeout 5s php -v 2>/dev/null | head -1 | awk '{print $2}' || true)"
-        PHP_INSTALLED="${PHP_INSTALLED_VERSION%%.*}"
+        PHP_INSTALLED="$(printf '%s\n' "${PHP_INSTALLED_VERSION}" | cut -d. -f1,2)"
         INSTALLED_TOOLS+=("PHP ${PHP_INSTALLED_VERSION}")
     fi
+
+}
+
+detect_installed() {
+    info "Scanning for pre-installed software..."
+    info "Version checks are limited to 5 seconds per program."
+    INSTALLED_TOOLS=()
+
+    detect_installed_php
 
     # ── PostgreSQL ──
     POSTGRES_INSTALLED=""

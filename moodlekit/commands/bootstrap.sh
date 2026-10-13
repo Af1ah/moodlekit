@@ -54,10 +54,10 @@ cmd_bootstrap() {
             "PHP 8.1 (Moodle 4.5 LTS only)" \
             "Keep Current (${PHP_INSTALLED:-None})"
         case "${php_choice}" in
+            *Keep*) php_ver="${PHP_INSTALLED}" ;;
             *8.4*) php_ver="8.4" ;;
             *8.3*) php_ver="8.3" ;;
             *8.1*) php_ver="8.1" ;;
-            *Keep*) php_ver="${PHP_INSTALLED}" ;;
         esac
         # Fallback if Keep Current was selected but nothing installed
         [[ -z "${php_ver}" ]] && php_ver="8.4"
@@ -324,7 +324,7 @@ _install_php() {
 
     # Skip if correct version already installed
     if command -v "php${php_ver}" &>/dev/null; then
-        ok "PHP ${php_ver} already installed — skipping"
+        ok "PHP ${php_ver} already installed — ensuring FPM and required extensions"
         # Still ensure all extensions are present
     fi
 

@@ -9,7 +9,7 @@
 
 cmd_site_create() {
     require_root
-    load_global_conf
+    load_global_conf 0 auto
 
     local SLUG="${1:-}"
     if [[ -z "${SLUG}" ]]; then
@@ -85,8 +85,9 @@ cmd_site_create() {
         input_text ADMIN_EMAIL "Admin email" "admin@${DOMAIN}" '^[^@]+@[^@]+\.[^@]+$' "Invalid email"
 
     # Redis sessions
+    _site_create_detect_redis
     local USE_REDIS_SESSIONS=1
-    if [[ "${USE_REDIS}" == "1" ]] && [[ "${MOODLEKIT_YES:-0}" != "1" ]]; then
+    if [[ "${USE_REDIS:-0}" == "1" ]] && [[ "${MOODLEKIT_YES:-0}" != "1" ]]; then
         confirm "Enable Redis session handler?" "y" || USE_REDIS_SESSIONS=0
     fi
     [[ "${USE_REDIS:-0}" != "1" ]] && USE_REDIS_SESSIONS=0
@@ -833,6 +834,23 @@ CRONFILE
 # ---------------------------------------------------------------------------
 # Configure MUC Redis store — creates store instance in Moodle
 # ---------------------------------------------------------------------------
+_site_create_detect_redis() {
+    # Preserve explicit saved preferences; only discover an unspecified setting.
+    case "${USE_REDIS:-auto}" in
+        0|1) return 0 ;;
+    esac
+    USE_REDIS=0
+    if command -v redis-cli &>/dev/null && \
+        [[ "$(timeout 5s redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null || true)" == "PONG" ]]; then
+        if "/usr/bin/php${PHP_VERSION:-}" -m 2>/dev/null | grep -qi '^redis$'; then
+            USE_REDIS=1
+            info "Detected local Redis and PHP Redis extension."
+        else
+            warn "Local Redis is available, but the PHP Redis extension is missing; Redis integration is disabled."
+        fi
+    fi
+}
+
 _configure_muc_redis() {
     local slug="$1"
     local moodle_dir="$2"

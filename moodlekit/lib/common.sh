@@ -585,6 +585,8 @@ detect_moodle_cron() {
 # Global & Site config helpers (Backed by Encrypted Binary Vault)
 # ---------------------------------------------------------------------------
 load_global_conf() {
+    # Optional second argument selects the Redis fallback for callers that
+    # discover existing services, without overriding saved configuration.
     local required="${1:-0}"
     if type vault_load_global &>/dev/null && vault_load_global; then
         return 0
@@ -605,7 +607,7 @@ load_global_conf() {
     BASE_DOMAIN="${BASE_DOMAIN:-}"
     PHP_VERSION="${PHP_VERSION:-8.4}"
     DB_TYPE="${DB_TYPE:-mariadb}"
-    USE_REDIS="${USE_REDIS:-0}"
+    USE_REDIS="${USE_REDIS:-${2:-0}}"
     USE_MEMCACHED="${USE_MEMCACHED:-0}"
     return 0
 }

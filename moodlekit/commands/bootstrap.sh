@@ -449,23 +449,23 @@ _install_nginx() {
 _install_redis() {
     local php_ver="$1"
     if [[ -n "${REDIS_INSTALLED:-}" ]]; then
-        ok "Redis already installed — skipping"
+        ok "Redis already installed — preserving existing configuration"
     else
         DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server
-        systemctl enable --now redis-server
+        systemctl enable redis-server
     fi
 
-    # Tune: localhost only, no persistence, LRU eviction
-    local redis_conf="/etc/redis/redis.conf"
-    if [[ -f "${redis_conf}" ]]; then
-        sed -i 's|^bind .*|bind 127.0.0.1 -::1|' "${redis_conf}"
-        grep -q '^maxmemory-policy' "${redis_conf}" \
-            || echo "maxmemory-policy allkeys-lru" >> "${redis_conf}"
-        sed -i 's|^appendonly .*|appendonly no|' "${redis_conf}"
-        sed -i 's|^save |# save |g' "${redis_conf}"
+    # Existing Redis may serve other applications or require persistence/auth.
+    # Never rewrite its settings or restart a healthy service during install.
+    if ! systemctl is-active --quiet redis-server; then
+        if ! systemctl start redis-server; then
+            err "Redis failed to start; existing configuration and data were left unchanged."
+            err "Inspect: journalctl -u redis-server.service -n 80 --no-pager"
+            err "Also inspect the logfile configured in /etc/redis/redis.conf."
+            return 1
+        fi
     fi
-    systemctl restart redis-server
-    ok "Redis installed and tuned (localhost only, allkeys-lru)"
+    ok "Redis service is active (existing settings preserved)"
 }
 
 # ---------------------------------------------------------------------------

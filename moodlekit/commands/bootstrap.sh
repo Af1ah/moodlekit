@@ -411,32 +411,34 @@ _install_nginx() {
         systemctl enable --now nginx
     fi
 
-    # Remove default site
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    # Preserve existing sites, including the distribution's default site.
 
-    # Global Moodle config
-    cat > /etc/nginx/conf.d/10-moodlekit-global.conf << 'NGINXGLOBAL'
-# MoodleKit global Nginx settings
-client_max_body_size    256M;
-client_body_buffer_size 128k;
-server_tokens           off;
-
-keepalive_timeout  65;
-keepalive_requests 100;
-
-# Login throttling is managed by Moodle account policies.
-# Do not create a shared per-IP zone: campus users may share one address.
-NGINXGLOBAL
-
-    # Enable Gzip in main nginx.conf instead of conf.d to prevent duplicates
-    if [[ -f /etc/nginx/nginx.conf ]]; then
-        sed -i 's/# gzip_vary on;/gzip_vary on;/' /etc/nginx/nginx.conf
-        sed -i 's/# gzip_proxied any;/gzip_proxied any;/' /etc/nginx/nginx.conf
-        sed -i 's/# gzip_comp_level 6;/gzip_comp_level 5;/' /etc/nginx/nginx.conf
-        sed -i 's/# gzip_types /gzip_types /' /etc/nginx/nginx.conf
+    # Follow active includes and add only defaults missing from HTTP scope.
+    # Keep nginx.conf and administrator snippets unchanged.
+    local managed=/etc/nginx/conf.d/10-moodlekit-global.conf
+    local candidate backup=""
+    candidate="$(mktemp /etc/nginx/conf.d/.moodlekit-global.XXXXXX)"
+    if ! python3 "${MOODLEKIT_LIB}/nginx_defaults.py" /etc/nginx/nginx.conf "${managed}" > "${candidate}"; then
+        rm -f "${candidate}"
+        err "Could not inspect existing Nginx configuration; no defaults changed."
+        return 1
     fi
-
-    nginx -t 2>&1
+    if [[ -f "${managed}" ]]; then
+        backup="$(mktemp /etc/nginx/conf.d/.moodlekit-backup.XXXXXX)"
+        cp -p "${managed}" "${backup}"
+    fi
+    chmod 644 "${candidate}"
+    mv "${candidate}" "${managed}"
+    if ! nginx -t 2>&1; then
+        if [[ -n "${backup}" ]]; then
+            mv "${backup}" "${managed}"
+        else
+            rm -f "${managed}"
+        fi
+        err "Nginx validation failed; restored the previous MoodleKit defaults."
+        return 1
+    fi
+    [[ -z "${backup}" ]] || rm -f "${backup}"
     systemctl reload nginx
     ok "Nginx installed and configured"
 }

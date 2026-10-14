@@ -81,6 +81,15 @@ def progress_bar(pct: float, width: int = 16) -> str:
     filled = int(width * pct / 100)
     return "█" * filled + "░" * (width - filled)
 
+def transfer_direction(src: str, dst: str) -> str:
+    remote_src = bool(re.match(r"^[^/]+:", src))
+    remote_dst = bool(re.match(r"^[^/]+:", dst))
+    if remote_src and not remote_dst:
+        return "Download"
+    if remote_dst and not remote_src:
+        return "Upload"
+    return "Transfer"
+
 def now_str() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
@@ -135,7 +144,7 @@ class Telegram:
         self.token = token
         self.chat_id = chat_id
         self.logger = logger
-        self.edit_interval = edit_interval
+        self.edit_interval = max(15, edit_interval)
         self.last_text = None
         self.last_edit_ts = 0
         self.enabled = bool(token and token != "YOUR_BOT_TOKEN_HERE" and chat_id and chat_id != "YOUR_CHAT_ID_HERE")
@@ -217,6 +226,9 @@ class Telegram:
             self.send(text)
             return
 
+        # Throttle failed requests too; otherwise each stats poll retries HTTP.
+        self.last_edit_ts = time.time()
+
         url = f"https://api.telegram.org/bot{self.token}/editMessageText"
         data = json.dumps(
             {"chat_id": self.chat_id, "message_id": self.message_id, "text": text, "parse_mode": "HTML"}
@@ -229,6 +241,14 @@ class Telegram:
             self.last_edit_ts = time.time()
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
+            if e.code == 429:
+                try:
+                    retry_after = int(json.loads(body).get("parameters", {}).get("retry_after", 30))
+                except (ValueError, TypeError):
+                    retry_after = 30
+                self.last_edit_ts = time.time() + max(self.edit_interval, retry_after) - self.edit_interval
+                self.logger.write("[telegram] edit rate limited; respecting retry delay")
+                return
             if "message is not modified" in body:
                 self.last_text = text
                 self.last_edit_ts = time.time()
@@ -282,7 +302,7 @@ class RcloneJob:
         self.log_file = log_file
         self.logger = logger
         self.stall_timeout = stall_timeout
-        self.poll_interval = poll_interval
+        self.poll_interval = max(5, poll_interval)
         self.on_progress = on_progress
         self.dry_run = dry_run
 
@@ -589,20 +609,26 @@ class BackupRun:
         flags += r.get("extra_flags", [])
         return flags
 
-    def make_progress_cb(self, site_label: str):
+    def make_progress_cb(self, site_label: str, direction: str = "Transfer"):
         def cb(label, bytes_done, bytes_total, speed, eta, errors, files_done, files_total):
             if bytes_total and bytes_total > 0:
-                pct = 100.0 * bytes_done / bytes_total
+                pct = max(0.0, min(100.0, 100.0 * bytes_done / bytes_total))
                 bar = progress_bar(pct)
                 body = (
-                    f"⏳ <b>{site_label}</b>\n"
-                    f"{bar} {pct:4.1f}%\n"
-                    f"{human_size(bytes_done)} / {human_size(bytes_total)}  "
-                    f"@ {human_size(speed)}/s\n"
+                    f"⏳ <b>{esc(site_label)}</b> — {esc(direction)}\n"
+                    f"<code>{bar}</code> {pct:4.1f}%\n"
+                    f"{human_size(bytes_done)} / {human_size(bytes_total)}\n"
+                    f"{esc(direction)} speed: {human_size(max(0, speed or 0))}/s\n"
                     f"Files: {files_done}/{files_total}   ETA: {human_eta(eta)}"
                 )
             else:
-                body = f"⏳ <b>{site_label}</b>\n🔍 Scanning files (verifying remote state)..."
+                body = (
+                    f"⏳ <b>{esc(site_label)}</b> — {esc(direction)}\n"
+                    "🔍 Discovering total size (progress pending)\n"
+                    f"Transferred: {human_size(bytes_done)}\n"
+                    f"{esc(direction)} speed: {human_size(max(0, speed or 0))}/s\n"
+                    f"Files: {files_done}/{files_total}   ETA: {human_eta(eta)}"
+                )
             if errors:
                 body += f"\n⚠️ errors so far: {errors}"
             self.tg.edit(self.header + "\n".join(self.body_lines) + ("\n" if self.body_lines else "") + body)
@@ -622,7 +648,7 @@ class BackupRun:
             logger=self.logger,
             stall_timeout=self.cfg.get("stall_timeout_seconds", 420),
             poll_interval=self.cfg.get("poll_interval_seconds", 5),
-            on_progress=self.make_progress_cb(label),
+            on_progress=self.make_progress_cb(label, transfer_direction(src, dst)),
             dry_run=self.dry_run,
         )
         return job.run_with_retries(
